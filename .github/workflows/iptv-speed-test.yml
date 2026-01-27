@@ -1,10 +1,10 @@
-name: IPTV源测速-严格匹配原始格式
+name: IPTV源测速-极速版（严格匹配格式）
 on:
   schedule:
-    - cron: '0 18 * * *'  # 北京时间每日凌晨2点自动运行
-  workflow_dispatch:       # 手动触发开关（优先测试用）
+    - cron: '0 18 * * *'  # 北京时间每日凌晨2点
+  workflow_dispatch:
 permissions:
-  contents: write          # 允许提交文件到仓库
+  contents: write
 jobs:
   speed-test:
     runs-on: ubuntu-latest
@@ -14,18 +14,17 @@ jobs:
       - name: 配置Python环境
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'  # 稳定版本，兼容所有逻辑
-      - name: 安装依赖（仅requests）
+          python-version: '3.10'
+      - name: 安装异步依赖（核心提速）
         run: |
           python -m pip install --upgrade pip
-          pip install requests
-      - name: 运行测速脚本（核心步骤）
+          pip install aiohttp requests  # aiohttp用于异步请求
+      - name: 运行极速测速脚本
         run: python iptv_test.py
-      - name: 提交结果到仓库根目录
+      - name: 提交结果
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           git add result.txt
-          # 仅当文件有变更时提交，避免空提交
-          git commit -m "更新IPTV源（$(date +'%Y-%m-%d %H:%M:%S')）" || echo "无变更，无需提交"
+          git commit -m "IPTV源更新（极速版）：$(date +'%Y-%m-%d %H:%M:%S')" || echo "无变更"
           git push
