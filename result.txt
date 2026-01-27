@@ -1,10 +1,14 @@
-🕘️2026-01-27 00:54:05,#genre#
+🕘️2026-01-27 18:28:08,#genre#
 📺央视频道,#genre#
-CCTV-17,http://hmfs.f3322.net:3388/hls/37/index.m3u8
+CCTV-2,http://27.41.245.32:801/hls/2/index.m3u8
+浙江卫视,http://ali-xwl.cztv.com/live/channel011080Plxw.m3u8
 东南卫视,http://live.zohi.tv/video/s10001-fztv-3/index.m3u8
-CCTV-9,http://60.16.0.216:5757/hls/10/index.m3u8
-CCTV-2,http://23.237.228.134/live5/CCTV2.m3u8
 CCTV-7,https://ldocctvwbcdtxy.liveplay.myqcloud.com/ldocctvwbcd/cdrmldcctv7_1_td.m3u8
-CCTV-11,http://60.16.0.216:5757/hls/12/index.m3u8
+CCTV-2,https://p2.bdstatic.com/rtmp.liveshow.lss-user.baidubce.com/live/stream_bduid_6488563992_8982723413/merged_1707497046297_88536_25144_41936.m3u8
+CCTV-12,http://69.30.246.194/live/cctv12.m3u8
+CCTV-5+,http://cssbyd.imwork.net:8082/hls/6/index.m3u8
+东方卫视,http://bp-resource-dfl.bestv.cn/155/3/video.m3u8
+CCTV-2,http://112.27.235.94:8000/hls/2/index.m3u8
+CCTV-11,http://111.61.236.247:9081/hls/11/index.m3u8
 CCTV-3,http://112.27.235.94:8000/hls/3/index.m3u8
 📡卫视频道,#genre#
