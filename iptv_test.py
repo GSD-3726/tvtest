@@ -6,51 +6,50 @@ from urllib.parse import urljoin
 from datetime import datetime
 import requests
 
-# ===================== 极速配置（核心提速）=====================
+# ===================== 配置（保留1080P阈值+极速并发）=====================
 RAW_TXT_URL = "https://gh-proxy.com/https://raw.githubusercontent.com/GSD-3726/IPTV/master/output/result.txt"
 OUTPUT_FILE = "result.txt"
-# 异步并发数（根据服务器性能调整，建议5-10）
-CONCURRENT_LIMIT = 8
-# 测速配置（更少数据，更快验证）
-TEST_SHARD_COUNT = 2  # m3u8仅测试2个分片（原3个）
-TIMEOUT_FAST = 2      # 快速预处理超时（秒，原5）
-TIMEOUT_DEEP = 3      # 深度测速超时（秒，原5）
-# 卡顿判定阈值（适配极速测试）
-FAIL_RATE_THRESHOLD = 0.1   # 失败率≤10%
-AVG_TIME_THRESHOLD = 2.0    # 平均耗时≤2秒（原2.5）
-MAX_TIME_THRESHOLD = 4.0    # 最大耗时≤4秒（原6）
-# 支持的协议
+CONCURRENT_LIMIT = 8  # 并发数（5-10最佳，避免被限）
+TEST_SHARD_COUNT = 2  # m3u8分片测试数
+TIMEOUT_LIGHT = 2     # 轻量检测超时（秒）
+TIMEOUT_DEEP = 3      # 深度测速超时（秒）
+# 1080P流畅阈值
+FAIL_RATE_THRESHOLD = 0.05
+AVG_TIME_THRESHOLD = 1.5
+MAX_TIME_THRESHOLD = 4.0
+MIN_HD_SHARD_SIZE = 102400  # 1080P分片≥100KB
 SUPPORTED_PROTOCOLS = ("http://", "https://")
 
-# ===================== 异步工具函数（核心提速）=====================
-async def async_head_check(session, url):
-    """异步快速检测链接是否可达（HEAD请求，仅1-2KB数据）"""
+# ===================== 异步工具函数（修复检测逻辑，移除HEAD）=====================
+async def async_light_check(session, url):
+    """替代HEAD的轻量GET检测：仅下载1KB数据，兼容所有IPTV源"""
     try:
-        async with session.head(url, timeout=TIMEOUT_FAST, allow_redirects=True):
-            return True
+        async with session.get(url, timeout=TIMEOUT_LIGHT) as resp:
+            # 仅读取1KB数据，不下载完整内容
+            await resp.content.read(1024)
+            return resp.status == 200
     except Exception:
         return False
 
-async def async_download_small(session, url, max_bytes=10*1024):
-    """异步下载少量数据（验证可用性，返回耗时+是否成功）"""
+async def async_download_hd(session, url, max_bytes):
+    """异步下载指定大小数据，返回（耗时，是否成功，下载字节数）"""
     try:
         start_time = time.time()
         async with session.get(url, timeout=TIMEOUT_DEEP) as resp:
             if resp.status != 200:
-                return 0, False
+                return 0, False, 0
             total_bytes = 0
             async for chunk in resp.content.iter_chunked(1024):
                 total_bytes += len(chunk)
                 if total_bytes >= max_bytes:
                     break
             cost_time = round(time.time() - start_time, 3)
-            # 至少下载2KB视为成功
-            return cost_time, total_bytes >= 2*1024
+            return cost_time, total_bytes >= 2*1024, total_bytes  # 至少2KB视为有效
     except Exception:
-        return 0, False
+        return 0, False, 0
 
 async def parse_m3u8_async(session, m3u8_url):
-    """异步解析m3u8，仅返回前N个分片"""
+    """异步解析m3u8，仅取前N个分片"""
     try:
         async with session.get(m3u8_url, timeout=TIMEOUT_DEEP) as resp:
             if resp.status != 200:
@@ -62,24 +61,28 @@ async def parse_m3u8_async(session, m3u8_url):
                 line = line.strip()
                 if line and not line.startswith('#') and line.endswith('.ts'):
                     shards.append(urljoin(base_url, line))
-                    if len(shards) >= TEST_SHARD_COUNT:  # 仅取需要的分片数
+                    if len(shards) >= TEST_SHARD_COUNT:
                         break
             return shards if shards else None
     except Exception:
         return None
 
 async def test_m3u8_async(session, m3u8_url):
-    """异步测试m3u8流畅度（并发测试分片）"""
+    """异步测试1080P m3u8流：分片大小+速度双重验证"""
     shards = await parse_m3u8_async(session, m3u8_url)
     if not shards:
         return False
-    # 并发测试所有分片
-    tasks = [async_download_small(session, shard) for shard in shards]
+    # 并发测试分片
+    tasks = [async_download_hd(session, shard, MIN_HD_SHARD_SIZE) for shard in shards]
     results = await asyncio.gather(*tasks)
-    # 统计有效结果
-    cost_times = [t for t, ok in results if ok]
+    # 统计有效结果（同时满足：下载成功+分片≥100KB）
+    cost_times = []
+    for t, ok, b in results:
+        if ok and b >= MIN_HD_SHARD_SIZE:
+            cost_times.append(t)
     if not cost_times:
         return False
+    # 1080P阈值判定
     fail_rate = (len(results) - len(cost_times)) / len(results)
     avg_time = statistics.mean(cost_times)
     max_time = max(cost_times)
@@ -88,118 +91,128 @@ async def test_m3u8_async(session, m3u8_url):
             max_time <= MAX_TIME_THRESHOLD)
 
 async def test_flv_async(session, flv_url):
-    """异步测试flv流畅度（仅下载50KB）"""
-    cost_time, ok = await async_download_small(session, flv_url, max_bytes=50*1024)
-    return ok and cost_time <= MAX_TIME_THRESHOLD
+    """异步测试1080P flv流：下载200KB验证大小+速度"""
+    cost_time, ok, total_bytes = await async_download_hd(session, flv_url, 204800)
+    # 1080P FLV要求：下载成功+≥200KB+耗时≤阈值
+    return ok and total_bytes >= 204800 and cost_time <= MAX_TIME_THRESHOLD
 
 async def test_url_async(session, name, url, result_queue):
-    """异步测试单个地址，结果存入队列"""
+    """异步测试单个地址：轻量GET检测→深度测速"""
     print(f"测试中：{name} | {url[:60]}...", end=" ")
-    # 第一步：快速过滤无效链接
-    if not await async_head_check(session, url):
-        print("❌ 快速检测失败（不可达）")
+    # 第一步：轻量GET检测（替代HEAD，兼容所有服务器）
+    if not await async_light_check(session, url):
+        print("❌ 链接不可达/无效")
         return
-    # 第二步：深度测速
+    # 第二步：深度测速（1080P标准）
     if url.endswith('.m3u8'):
         is_smooth = await test_m3u8_async(session, url)
     elif url.endswith('.flv'):
         is_smooth = await test_flv_async(session, url)
     else:
-        is_smooth = False
+        print("❌ 非m3u8/flv协议")
+        return
     # 结果入队
     if is_smooth:
-        print("✅ 流畅（保留）")
+        print("✅ 1080P流畅（保留）")
         await result_queue.put((name, url))
     else:
-        print("❌ 卡顿/不支持（跳过）")
+        print("❌ 1080P卡顿/低清")
 
 # ===================== 主逻辑（保留原始格式+极速运行）=====================
 def download_original_txt():
     """同步下载原始txt（仅一次，耗时可忽略）"""
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
         resp = requests.get(RAW_TXT_URL, headers=headers, timeout=10)
         resp.raise_for_status()
         resp.encoding = "utf-8"
         return [line.rstrip('\n') for line in resp.text.splitlines() if line.strip()]
     except Exception as e:
-        print(f"下载原始文件失败：{e}")
+        print(f"❌ 下载原始文件失败：{e}")
         return []
 
 async def main_async():
     print("="*70)
-    print(f"IPTV极速测速开始 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"并发数：{CONCURRENT_LIMIT} | 超时：快速{TIMEOUT_FAST}s / 深度{TIMEOUT_DEEP}s")
+    print(f"IPTV极速测速（1080P）| {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"并发数：{CONCURRENT_LIMIT} | 轻量检测{TIMEOUT_LIGHT}s / 深度测速{TIMEOUT_DEEP}s")
     print("="*70)
     
-    # 1. 下载原始txt（保留格式）
+    # 1. 下载原始txt（保留所有格式）
     original_lines = download_original_txt()
     if not original_lines:
-        print("❌ 无原始数据，终止")
+        print("❌ 无原始数据，终止流程")
         return
     
-    # 2. 解析原始行，分离分类行/地址行
-    genre_lines = []       # 分类行（如📺央视频道,#genre#）
-    url_tasks = []         # 待测试的地址任务 (name, url)
-    update_time_line = ""  # 更新时间行
+    # 2. 解析原始行：分离分类行/地址行/更新时间行
+    genre_map = {}        # 分类行位置映射 {地址索引: 分类行}
+    url_tasks = []        # 待测试地址 [(name, url)]
+    update_time_line = "" # 更新时间行
     current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
+
     for line in original_lines:
         if line.startswith("🕘️") and "#genre#" in line:
+            # 处理更新时间行，保留原始格式
             update_time_line = f"🕘️{current_datetime},#genre#"
         elif "#genre#" in line and not line.startswith("🕘️"):
-            genre_lines.append((len(url_tasks), line))  # 记录分类行位置
+            # 记录分类行，关联后续地址
+            genre_map[len(url_tasks)] = line
         elif "," in line:
-            name, url = line.split(",", 1)
-            name = name.strip()
-            url = url.strip()
+            # 解析地址行，仅分割第一个逗号（兼容链接含逗号）
+            name_part, url_part = line.split(",", 1)
+            name = name_part.strip()
+            url = url_part.strip()
             if url.startswith(SUPPORTED_PROTOCOLS):
                 url_tasks.append((name, url))
-    
+
     # 3. 异步并发测试所有地址（核心提速）
     result_queue = asyncio.Queue()
-    # 创建异步session（复用连接）
+    # 创建异步Session：复用连接+设置UA（模拟浏览器，防屏蔽）
     connector = aiohttp.TCPConnector(limit=CONCURRENT_LIMIT)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        # 创建所有测试任务
-        tasks = [test_url_async(session, name, url, result_queue) for name, url in url_tasks]
-        # 并发执行
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
+        tasks = [test_url_async(session, n, u, result_queue) for n, u in url_tasks]
         await asyncio.gather(*tasks)
-    
-    # 4. 整理测试结果（保留原始分类结构）
+
+    # 4. 整理结果：严格保留原始分类结构和格式
     smooth_urls = []
     while not result_queue.empty():
         smooth_urls.append(await result_queue.get())
-    # 按原始顺序整理输出行
+    smooth_urls = sorted(smooth_urls, key=lambda x: url_tasks.index((x[0], x[1])))  # 保留原始顺序
+
     output_lines = [update_time_line] if update_time_line else []
-    url_idx = 0
-    # 插入分类行+对应地址
-    for genre_pos, genre_line in sorted(genre_lines, key=lambda x: x[0]):
+    current_url_idx = 0
+    # 按原始顺序插入分类行和对应地址
+    sorted_genre = sorted(genre_map.items(), key=lambda x: x[0])
+    for idx, genre_line in sorted_genre:
         output_lines.append(genre_line)
         # 插入该分类下的流畅地址
-        while url_idx < len(smooth_urls) and url_idx <= genre_pos:
-            name, url = smooth_urls[url_idx]
-            output_lines.append(f"{name},{url}")
-            url_idx += 1
-    # 补充剩余地址
-    while url_idx < len(smooth_urls):
-        name, url = smooth_urls[url_idx]
-        output_lines.append(f"{name},{url}")
-        url_idx += 1
-    
-    # 5. 写入结果（严格匹配原始格式）
+        while current_url_idx < len(smooth_urls) and current_url_idx < len(url_tasks) and url_tasks.index(smooth_urls[current_url_idx]) >= idx:
+            if current_url_idx < len(smooth_urls):
+                n, u = smooth_urls[current_url_idx]
+                output_lines.append(f"{n},{u}")
+                current_url_idx += 1
+            else:
+                break
+    # 补充剩余无分类的流畅地址
+    while current_url_idx < len(smooth_urls):
+        n, u = smooth_urls[current_url_idx]
+        output_lines.append(f"{n},{u}")
+        current_url_idx += 1
+
+    # 5. 写入结果：严格匹配原始txt格式（无任何多余字符）
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(output_lines))
-    
+
     # 6. 统计输出
     print("="*70)
-    print(f"✅ 极速测速完成 | 总测试地址：{len(url_tasks)} | 保留流畅地址：{len(smooth_urls)}")
-    print(f"📄 结果文件：{OUTPUT_FILE}（格式与原始完全一致）")
+    print(f"✅ 1080P测速完成 | 总测试地址：{len(url_tasks)} | 保留流畅地址：{len(smooth_urls)}")
+    print(f"📄 结果文件：仓库根目录/{OUTPUT_FILE}（格式与原始完全一致）")
     print("="*70)
 
 if __name__ == "__main__":
-    # 适配Windows/Linux异步运行
-    if asyncio.get_event_loop_policy().__class__.__name__ == "WindowsProactorEventLoopPolicy":
+    # 适配Windows/Linux异步运行（解决GitHub Actions/Ubuntu兼容问题）
+    try:
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    # 运行异步主逻辑
+    except:
+        pass
     asyncio.run(main_async())
