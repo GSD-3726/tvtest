@@ -2,152 +2,184 @@ import requests
 import time
 import statistics
 from urllib.parse import urljoin
-import re
+from datetime import datetime
 
-# ===================== 配置参数 =====================
-# 远程播放列表地址（改用raw地址，避免GitHub blob页面的HTML干扰）
-REMOTE_RESULT_URL = "https://gh-proxy.com/https://raw.githubusercontent.com/GSD-3726/IPTV/master/output/result.txt"
-# 测速配置
-TEST_SHARD_COUNT = 5  # 每个链接测试的分片数量（批量检测建议减少，提升速度）
-TIMEOUT = 5  # 每个分片下载超时时间（秒）
-# 卡顿判定阈值（可根据需求调整）
-FAIL_RATE_THRESHOLD = 0.1  # 失败率≤10% 视为不卡顿
-AVG_TIME_THRESHOLD = 2.0   # 平均耗时≤2秒 视为不卡顿
-MAX_TIME_THRESHOLD = 5.0   # 最大耗时≤5秒 视为不卡顿
-# 输出文件路径（仓库根目录）
-OUTPUT_FILE = "result.txt"
+# ===================== 核心配置（无需修改）=====================
+# 原始txt的RAW地址（跳过GitHub blob页面，直接获取纯文本）
+RAW_TXT_URL = "https://gh-proxy.com/https://raw.githubusercontent.com/GSD-3726/IPTV/master/output/result.txt"
+OUTPUT_FILE = "result.txt"  # 输出到仓库根目录，文件名与原始一致
+# 测速配置（平衡海外服务器速度/准确性）
+TEST_SHARD_COUNT = 3  # m3u8分片测试数量
+TIMEOUT = 5           # 单次请求超时时间（秒）
+# 卡顿判定阈值（适配海外服务器访问国内源）
+FAIL_RATE_THRESHOLD = 0.1   # 失败率≤10%
+AVG_TIME_THRESHOLD = 2.5    # 平均下载耗时≤2.5秒
+MAX_TIME_THRESHOLD = 6.0    # 最大下载耗时≤6秒
+# 支持的协议（UDP无法通过HTTP测试，直接过滤）
+SUPPORTED_PROTOCOLS = ("http://", "https://")
 
-# ===================== 核心函数 =====================
-def download_remote_result():
-    """下载远程的result.txt，返回解析后的播放地址列表 [(名称, 链接), ...]"""
+# ===================== 工具函数 =====================
+def download_original_txt():
+    """下载原始txt文件，返回【原始行列表】（保留所有表情/符号/空格）"""
     try:
-        print(f"开始下载远程播放列表：{REMOTE_RESULT_URL}")
-        response = requests.get(REMOTE_RESULT_URL, timeout=10)
-        response.raise_for_status()
-        # 按行解析，过滤空行和无效行
-        lines = response.text.strip().split('\n')
-        play_list = []
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            # 匹配 "名称,链接" 格式（兼容中英文逗号、空格分隔）
-            match = re.split(r'[,，\s]+', line, maxsplit=1)
-            if len(match) == 2:
-                name = match[0].strip()
-                url = match[1].strip()
-                # 仅处理m3u8链接（过滤非直播流地址）
-                if url.endswith('.m3u8'):
-                    play_list.append((name, url))
-        print(f"成功解析到 {len(play_list)} 个m3u8播放地址")
-        return play_list
+        # 模拟浏览器请求，避免被拦截
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        response = requests.get(RAW_TXT_URL, headers=headers, timeout=20)
+        response.raise_for_status()  # 抛出HTTP错误
+        response.encoding = "utf-8"  # 强制UTF-8，保证中文/表情无乱码
+        # 按行分割，保留原始换行符外的所有格式（过滤纯空行）
+        original_lines = [line.rstrip('\n') for line in response.text.splitlines() if line.strip()]
+        print(f"✅ 成功下载原始文件，共{len(original_lines)}行（保留所有原始格式）")
+        return original_lines
     except Exception as e:
-        print(f"下载/解析远程播放列表失败：{str(e)}")
+        print(f"❌ 下载原始txt失败：{str(e)}")
         return []
 
-def parse_m3u8_manually(m3u8_url):
-    """手动解析m3u8文件，提取ts分片链接（不依赖m3u8库）"""
+def parse_m3u8_shards(m3u8_url):
+    """手动解析m3u8文件，提取ts分片链接（不依赖第三方库）"""
     try:
         response = requests.get(m3u8_url, timeout=TIMEOUT)
         response.raise_for_status()
-        lines = response.text.strip().split('\n')
+        base_url = m3u8_url.rsplit('/', 1)[0] + '/' if '/' in m3u8_url else ''
         shard_links = []
-        base_url = m3u8_url.rsplit('/', 1)[0] + '/'
-        for line in lines:
+        for line in response.text.splitlines():
             line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            if line.endswith('.ts'):
-                full_shard_url = urljoin(base_url, line)
-                shard_links.append(full_shard_url)
-        if not shard_links:
-            raise ValueError("无ts分片链接")
-        return shard_links
-    except Exception as e:
-        print(f"解析m3u8失败 {m3u8_url[:50]}...：{str(e)}")
-        return []
-
-def test_shard_download(shard_url):
-    """测试单个ts分片下载"""
-    try:
-        start_time = time.time()
-        response = requests.get(shard_url, timeout=TIMEOUT, stream=True)
-        response.raise_for_status()
-        total_bytes = 0
-        for chunk in response.iter_content(chunk_size=1024):
-            if chunk:
-                total_bytes += len(chunk)
-        end_time = time.time()
-        cost_time = round(end_time - start_time, 3)
-        if total_bytes == 0:
-            return cost_time, False, "分片为空"
-        return cost_time, True, "下载成功"
-    except requests.exceptions.Timeout:
-        return TIMEOUT, False, "超时"
-    except requests.exceptions.RequestException as e:
-        return 0, False, f"请求失败：{str(e)[:20]}"
+            # 跳过注释行和空行，只保留ts分片
+            if line and not line.startswith('#') and line.endswith('.ts'):
+                shard_links.append(urljoin(base_url, line))
+        return shard_links if shard_links else None
+    except Exception:
+        return None
 
 def test_stream_smoothness(play_url):
-    """测试单个播放地址的流畅度，返回是否卡顿"""
-    print(f"\n正在测试：{play_url[:80]}...")
-    # 1. 解析m3u8获取分片
-    shard_links = parse_m3u8_manually(play_url)
-    if not shard_links:
-        return False, "无法解析分片"
-    # 2. 测试分片下载
-    test_shards = shard_links[:TEST_SHARD_COUNT]
-    success_count = 0
-    cost_times = []
-    for shard_url in test_shards:
-        cost_time, is_success, _ = test_shard_download(shard_url)
-        if is_success:
-            success_count += 1
-            cost_times.append(cost_time)
-    # 3. 计算指标并判定
-    total_count = len(test_shards)
-    fail_rate = (total_count - success_count) / total_count if total_count > 0 else 1.0
-    avg_time = statistics.mean(cost_times) if cost_times else float('inf')
-    max_time = max(cost_times) if cost_times else float('inf')
+    """测试单个播放地址是否卡顿（适配m3u8/flv）"""
+    # 过滤不支持的协议（UDP等）
+    if not play_url.startswith(SUPPORTED_PROTOCOLS):
+        return False
     
-    is_smooth = (
-        fail_rate <= FAIL_RATE_THRESHOLD and
-        avg_time <= AVG_TIME_THRESHOLD and
-        max_time <= MAX_TIME_THRESHOLD
-    )
-    # 输出测试结果
-    status = "✅ 流畅" if is_smooth else "❌ 卡顿"
-    print(f"{status} | 失败率：{fail_rate:.2%} | 平均耗时：{avg_time:.3f}s | 最大耗时：{max_time:.3f}s")
-    return is_smooth, f"失败率：{fail_rate:.2%}，平均耗时：{avg_time:.3f}s"
+    # 测试m3u8格式
+    if play_url.endswith('.m3u8'):
+        shard_links = parse_m3u8_shards(play_url)
+        if not shard_links:
+            return False
+        success_count = 0
+        cost_times = []
+        # 测试前N个分片
+        for shard_url in shard_links[:TEST_SHARD_COUNT]:
+            try:
+                start_time = time.time()
+                # 流式下载前50KB，验证可用性
+                response = requests.get(shard_url, timeout=TIMEOUT, stream=True)
+                response.raise_for_status()
+                total_bytes = 0
+                for chunk in response.iter_content(chunk_size=1024):
+                    if chunk:
+                        total_bytes += len(chunk)
+                        if total_bytes >= 51200:  # 下载50KB后停止
+                            break
+                cost_time = round(time.time() - start_time, 3)
+                # 至少下载10KB视为成功
+                if total_bytes >= 10240:
+                    success_count += 1
+                    cost_times.append(cost_time)
+            except Exception:
+                continue
+        # 无成功分片则判定卡顿
+        if not cost_times:
+            return False
+        # 计算判定指标
+        fail_rate = (TEST_SHARD_COUNT - success_count) / TEST_SHARD_COUNT
+        avg_time = statistics.mean(cost_times)
+        max_time = max(cost_times)
+        # 判定是否流畅
+        return (fail_rate <= FAIL_RATE_THRESHOLD and
+                avg_time <= AVG_TIME_THRESHOLD and
+                max_time <= MAX_TIME_THRESHOLD)
+    
+    # 测试flv格式
+    elif play_url.endswith('.flv'):
+        try:
+            start_time = time.time()
+            response = requests.get(play_url, timeout=TIMEOUT, stream=True)
+            response.raise_for_status()
+            # 下载前100KB验证
+            total_bytes = 0
+            for chunk in response.iter_content(chunk_size=1024):
+                if chunk:
+                    total_bytes += len(chunk)
+                    if total_bytes >= 102400:
+                        break
+            cost_time = round(time.time() - start_time, 3)
+            # 至少下载10KB且耗时≤最大阈值视为流畅
+            return total_bytes >= 10240 and cost_time <= MAX_TIME_THRESHOLD
+        except Exception:
+            return False
+    
+    # 其他格式（非m3u8/flv）直接判定为卡顿
+    else:
+        return False
 
+# ===================== 主逻辑：严格按原始格式处理 =====================
 def main():
-    """主流程：下载列表→批量测速→筛选输出"""
-    print("="*60)
-    print("开始IPTV播放地址测速流程")
-    print("="*60)
+    print("="*70)
+    print(f"IPTV源测速开始 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*70)
     
-    # 步骤1：下载并解析远程播放列表
-    play_list = download_remote_result()
-    if not play_list:
-        print("❌ 未获取到任何播放地址，流程终止")
+    # 1. 下载原始txt，获取所有原始行（保留格式）
+    original_lines = download_original_txt()
+    if not original_lines:
+        print("❌ 无原始数据，终止流程")
         return
     
-    # 步骤2：批量测速，筛选不卡顿的地址
-    smooth_play_list = []
-    total_count = len(play_list)
-    for idx, (name, url) in enumerate(play_list, 1):
-        print(f"\n[{idx}/{total_count}] 测试：{name}")
-        is_smooth, reason = test_stream_smoothness(url)
-        if is_smooth:
-            smooth_play_list.append((name, url))
+    # 2. 处理每一行，严格保留原始格式
+    output_lines = []
+    total_test_url = 0
+    smooth_url_count = 0
+    current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # 步骤3：写入筛选结果到仓库根目录
-    print(f"\n" + "="*60)
-    print(f"测速完成！共检测 {total_count} 个地址，筛选出 {len(smooth_play_list)} 个不卡顿地址")
-    print(f"正在写入结果到 {OUTPUT_FILE}")
-    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        for name, url in smooth_play_list:
-            f.write(f"{name},{url}\n")
-    print(f"✅ 结果写入完成！")
+    for line in original_lines:
+        # 处理【更新时间行】：保留🕘️+#genre#，仅替换时间
+        if line.startswith("🕘️") and "#genre#" in line:
+            output_line = f"🕘️{current_datetime},#genre#"
+            output_lines.append(output_line)
+            print(f"📅 更新时间行：{output_line}")
+        
+        # 处理【分类行】：如📺央视频道,#genre#，完全保留原始格式
+        elif "#genre#" in line and not line.startswith("🕘️"):
+            output_lines.append(line)
+            print(f"\n📋 分类行（保留）：{line}")
+        
+        # 处理【播放地址行】：名称,链接 格式，测速后筛选
+        else:
+            if "," not in line:
+                continue  # 非名称+链接格式，跳过（避免无效行）
+            # 仅分割第一个逗号（防止链接含逗号导致解析错误）
+            name_part, url_part = line.split(",", 1)
+            name = name_part.strip()
+            play_url = url_part.strip()
+            total_test_url += 1
+            print(f"[{total_test_url}] 测试：{name} | {play_url[:60]}...", end=" ")
+            
+            # 测速并判定是否保留
+            if test_stream_smoothness(play_url):
+                smooth_url_count += 1
+                output_lines.append(line)  # 完全保留原始地址行格式
+                print("✅ 流畅（保留）")
+            else:
+                print("❌ 卡顿/不可用（跳过）")
+    
+    # 3. 写入结果到仓库根目录的result.txt（严格按原始格式）
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        # 按原始行的换行格式写入（每行一个条目）
+        f.write("\n".join(output_lines))
+    
+    # 4. 输出统计信息
+    print("="*70)
+    print(f"✅ 测速完成 | 总测试地址：{total_test_url} | 保留流畅地址：{smooth_url_count}")
+    print(f"📄 结果文件已生成：仓库根目录/{OUTPUT_FILE}（格式与原始txt完全一致）")
+    print("="*70)
 
 if __name__ == "__main__":
     main()
