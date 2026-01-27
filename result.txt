@@ -1,4 +1,10 @@
-🕘️2026-01-27 00:50:35,#genre#
+🕘️2026-01-27 00:54:05,#genre#
 📺央视频道,#genre#
-CCTV-1,http://23.237.228.134/live5/CCTV1.m3u8
+CCTV-17,http://hmfs.f3322.net:3388/hls/37/index.m3u8
+东南卫视,http://live.zohi.tv/video/s10001-fztv-3/index.m3u8
+CCTV-9,http://60.16.0.216:5757/hls/10/index.m3u8
+CCTV-2,http://23.237.228.134/live5/CCTV2.m3u8
+CCTV-7,https://ldocctvwbcdtxy.liveplay.myqcloud.com/ldocctvwbcd/cdrmldcctv7_1_td.m3u8
+CCTV-11,http://60.16.0.216:5757/hls/12/index.m3u8
+CCTV-3,http://112.27.235.94:8000/hls/3/index.m3u8
 📡卫视频道,#genre#
