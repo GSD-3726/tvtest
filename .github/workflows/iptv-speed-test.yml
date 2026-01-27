@@ -1,45 +1,31 @@
-name: IPTV播放地址测速并筛选
-
-# 触发条件：①每天凌晨2点运行 ②手动触发
+name: IPTV源测速-严格匹配原始格式
 on:
   schedule:
-    - cron: '0 18 * * *'  # UTC时间，对应北京时间凌晨2点
-  workflow_dispatch:  # 手动触发开关
-
-# 设置权限：允许读写仓库内容
+    - cron: '0 18 * * *'  # 北京时间每日凌晨2点自动运行
+  workflow_dispatch:       # 手动触发开关（优先测试用）
 permissions:
-  contents: write
-
+  contents: write          # 允许提交文件到仓库
 jobs:
   speed-test:
-    runs-on: ubuntu-latest  # 使用Ubuntu系统运行（稳定且速度快）
+    runs-on: ubuntu-latest
     steps:
-      # 步骤1：检出仓库代码（让Actions能操作仓库文件）
       - name: 检出仓库代码
         uses: actions/checkout@v4
-
-      # 步骤2：设置Python环境（匹配脚本依赖）
-      - name: 设置Python环境
+      - name: 配置Python环境
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'  # 推荐版本，兼容所有逻辑
-
-      # 步骤3：安装脚本依赖（仅需requests）
-      - name: 安装依赖
+          python-version: '3.10'  # 稳定版本，兼容所有逻辑
+      - name: 安装依赖（仅requests）
         run: |
           python -m pip install --upgrade pip
           pip install requests
-
-      # 步骤4：运行测速脚本（核心步骤）
-      - name: 运行IPTV测速脚本
+      - name: 运行测速脚本（核心步骤）
         run: python iptv_test.py
-
-      # 步骤5：提交并推送筛选后的结果到仓库
-      - name: 提交结果到仓库
+      - name: 提交结果到仓库根目录
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           git add result.txt
-          # 仅当文件有变更时提交（避免空提交）
-          git commit -m "更新不卡顿的IPTV播放源 $(date +'%Y-%m-%d %H:%M:%S')" || echo "无变更无需提交"
+          # 仅当文件有变更时提交，避免空提交
+          git commit -m "更新IPTV源（$(date +'%Y-%m-%d %H:%M:%S')）" || echo "无变更，无需提交"
           git push
