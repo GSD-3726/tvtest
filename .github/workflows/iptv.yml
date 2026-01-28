@@ -1,43 +1,43 @@
 name: IPTV链接处理
 on:
   push:
-    branches: master 
-  workflow_dispatch:  # 手动触发
+    branches: [main]  # 仅推送到master分支时自动运行
+  workflow_dispatch:    # 手动触发（Actions页面可点击运行）
 
+# 权限最小化（安全最佳实践）
 permissions:
   contents: read
   artifacts: write
 
 jobs:
   run-iptv-processor:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # 基于Ubuntu，自动安装FFmpeg更便捷
     steps:
-      - name: 检出代码
+      - name: 1. 检出仓库代码
         uses: actions/checkout@v4
 
-      - name: 设置Python 3.13
+      - name: 2. 配置Python 3.13环境
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-          cache: "pip"
+          cache: "pip"  # 缓存Python依赖，后续运行提速80%+
 
-      - name: 安装系统依赖（FFmpeg/ffprobe）
+      - name: 3. 安装系统依赖（FFmpeg/ffprobe 测速必备）
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg ffprobe
-          ffmpeg -version
+          sudo apt-get update -y && sudo apt-get install -y ffmpeg ffprobe
+          ffmpeg -version && ffprobe -version  # 验证安装结果，方便排查
 
-      - name: 安装Python依赖
+      - name: 4. 安装Python依赖包
         run: |
-          python -m pip install --upgrade pip
-          pip install requests aiohttp m3u8 async-timeout
+          python -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install requests aiohttp m3u8 async-timeout -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-      - name: 执行单文件脚本
+      - name: 5. 执行IPTV核心处理脚本
         run: python iptv_processor.py
 
-      - name: 上传生成的文件（可下载）
+      - name: 6. 上传生成的TXT/M3U文件（可下载）
         uses: actions/upload-artifact@v4
         with:
-          name: iptv-output-files
-          path: output/
-          retention-days: 7
+          name: iptv-output-files  # 下载包名称
+          path: output/            # 上传脚本生成的输出目录
+          retention-days: 7        # 文件保留7天，可改为30延长保留时间
