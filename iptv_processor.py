@@ -27,7 +27,7 @@ URL_PATTERN = re.compile(r'https?://[-A-Za-z0-9+&@#/%?=~_|!:,.;]+[-A-Za-z0-9+&@#
 
 # 测速配置
 SPEED_TEST_TIMEOUT = 10  # 单链接测速超时（秒）
-SPEED_TEST_FILTER_HOST = True  # 按域名缓存测速结果
+SPEED_TEST_FILTER_HOST = False  # 按域名缓存测速结果
 OPEN_FILTER_RESOLUTION = True  # 开启分辨率过滤
 MIN_RESOLUTION = 720  # 最低分辨率（宽）
 MAX_RESOLUTION = 2160  # 最高分辨率（宽）
