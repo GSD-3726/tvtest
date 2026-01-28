@@ -137,44 +137,61 @@ async def get_speed_with_download(url: str, headers: dict = None, session: Clien
             await session.close()
         return {'speed': speed, 'delay': delay, 'size': total_size, 'time': total_time}
 
-async def get_headers(url: str, headers: dict = None, session: ClientSession = None) -> dict:
-    """获取URL响应头"""
-    created_session = False
-    if session is None:
-        session = ClientSession(connector=TCPConnector(ssl=False), trust_env=True)
-        created_session = True
-    res_headers = {}
+async def get_result(url: str, headers: dict = None) -> dict:
+    """单链接测速：下载测速 + 分辨率 + m3u8解析"""
+    info = {'speed': 0, 'delay': -1, 'resolution': None}
     try:
-        async with session.head(url, headers=headers, timeout=5) as resp:
-            res_headers = dict(resp.headers)
+        url = quote(url, safe=':/?$&=@[]%').partition('$')[0]
+        res_headers = await get_headers(url, headers)
+        # 处理重定向
+        if location := res_headers.get('Location'):
+            return await get_result(location, headers)
+        # 解析m3u8流
+        content = await get_url_content(url, headers)
+        if content and any(h in res_headers.get('Content-Type', '').lower() for h in M3U8_HEADERS):
+            m3u8_obj = m3u8.loads(content)
+            segment_urls = []
+            # 处理多码率m3u8，选最高码率
+            if m3u8_obj.playlists:
+                best_playlist = max(m3u8_obj.playlists, key=lambda p: p.stream_info.bandwidth)
+                playlist_content = await get_url_content(urljoin(url, best_playlist.uri), headers)
+                if playlist_content:
+                    segment_urls = [urljoin(url, s.uri) for s in m3u8.loads(playlist_content).segments]
+            else:
+                segment_urls = [urljoin(url, s.uri) for s in m3u8_obj.segments]
+            # 测速m3u8片段（跳过第一个初始化片段，取后续5个）
+            if segment_urls:
+                sample_segs = segment_urls[1:6] if len(segment_urls) > 1 else segment_urls
+                tasks = [get_speed_with_download(seg, headers) for seg in sample_segs]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                # 过滤有效结果，按大小加权计算
+                valid_res = [r for r in results if isinstance(r, dict) and r['time'] > 0 and r['size'] > 0]
+                if valid_res:
+                    total_size = sum(r['size'] for r in valid_res)
+                    weighted_time = sum((r['size']/total_size)*r['time'] for r in valid_res)
+                    info['speed'] = total_size / weighted_time / 1024 / 1024
+                    info['delay'] = int(round(sum(r['delay'] for r in valid_res if r['delay']>0)/len(valid_res)))
+                else:
+                    info['delay'] = int(round((time()-start_time)*1000))
+        else:
+            # 非m3u8直接测速
+            download_res = await get_speed_with_download(url, headers)
+            info.update({'speed': download_res['speed'], 'delay': download_res['delay']})
     except:
         pass
-    finally:
-        if created_session:
-            await session.close()
-        return res_headers
+    return info
 
-async def get_url_content(url: str, headers: dict = None, session: ClientSession = None) -> str:
-    """获取URL文本内容"""
-    created_session = False
-    if session is None:
-        session = ClientSession(connector=TCPConnector(ssl=False), trust_env=True)
-        created_session = True
-    content = ""
-    try:
-        async with session.get(url, headers=headers, timeout=SPEED_TEST_TIMEOUT) as resp:
-            if resp.status == 200:
-                content = await resp.text()
-    except:
-        pass
-    finally:
-        if created_session:
-            await session.close()
-        return content
+def get_avg_result(results: list[dict]) -> dict:
+    """计算缓存中同域名的平均测速结果"""
+    if not results:
+        return {'speed': 0, 'delay': -1, 'resolution': None}
+    avg_speed = sum(r['speed'] or 0 for r in results) / len(results)
+    avg_delay = max(int(sum(r['delay'] or -1 for r in results)/len(results)), -1)
+    # 取最高分辨率
+    resolutions = [r['resolution'] for r in results if r['resolution'] and r['resolution'] != "音频流"]
+    avg_res = max(resolutions, key=lambda x: int(x.split('x')[0]) if 'x' in x else 0, default=None)
+    return {'speed': avg_speed, 'delay': avg_delay, 'resolution': avg_res}
 
-# ==============================================
-# 【测速入口】get_speed 函数定义
-# ==============================================
 async def get_speed(data: dict, headers: dict = None) -> dict:
     """单链接测速入口：带缓存"""
     url = data['url']
@@ -199,28 +216,22 @@ async def get_speed(data: dict, headers: dict = None) -> dict:
     finally:
         return result
 
-# ==============================================
-# 【批量测速】
-# ==============================================
-async def batch_speed_test(items: list[dict]) -> list[dict]:
+async def batch_speed_test(links: list[str]) -> list[str]:
     """批量测速并返回有效链接"""
     global CACHE
     CACHE = {}  # 清空缓存
     # 构造测速任务
-    test_tasks = [{'name': item['name'], 'url': item['url'], 'host': item['url'].split('/')[2], 'ipv_type': 'ipv4'} for item in items]
+    test_tasks = [{'url': link, 'host': link.split('/')[2], 'ipv_type': 'ipv4'} for link in links]
     # 异步批量测速
     print(f"🚀 开始批量测速（共{len(test_tasks)}个链接）")
     tasks = [get_speed(data) for data in test_tasks]
     test_results = await asyncio.gather(*tasks, return_exceptions=False)
     # 过滤排序
     sorted_res = get_sort_result(test_results)
-    valid_items = [{'name': res['name'], 'url': res['url']} for res in sorted_res]
-    print(f"✅ 测速完成，保留 {len(valid_items)} 个有效链接\n")
-    return valid_items
+    valid_links = [res['url'] for res in sorted_res]
+    print(f"✅ 测速完成，保留 {len(valid_links)} 个有效链接\n")
+    return valid_links
 
-# ==============================================
-# 【主程序入口】
-# ==============================================
 async def main():
     """主执行流程"""
     # 打印启动信息
