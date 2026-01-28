@@ -6,7 +6,7 @@ import subprocess
 import os
 import requests
 from time import time
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlparse
 
 import m3u8
 from aiohttp import ClientSession, TCPConnector
@@ -111,9 +111,61 @@ def print_startup_info():
     print("=" * 60 + "\n")
 
 # ==============================================
-# 【测速核心区】get_speed、get_result 和测速逻辑
+# 【新增缺失函数】修复未定义问题 - 核心修复点1
 # ==============================================
+async def get_headers(url: str, headers: dict = None) -> CIMultiDictProxy:
+    """获取链接响应头（异步），用于判断内容类型、重定向"""
+    if headers is None:
+        headers = REQUEST_HEADERS.copy()
+    async with ClientSession(connector=TCPConnector(ssl=False), trust_env=True) as session:
+        try:
+            async with session.head(url, headers=headers, timeout=SPEED_TEST_TIMEOUT, allow_redirects=True) as resp:
+                return resp.headers
+        except:
+            # 头请求失败则用get请求获取头
+            async with session.get(url, headers=headers, timeout=SPEED_TEST_TIMEOUT, allow_redirects=True) as resp:
+                return resp.headers
 
+async def get_url_content(url: str, headers: dict = None) -> str:
+    """获取链接文本内容（异步），用于解析m3u8"""
+    if headers is None:
+        headers = REQUEST_HEADERS.copy()
+    try:
+        async with ClientSession(connector=TCPConnector(ssl=False), trust_env=True) as session:
+            async with session.get(url, headers=headers, timeout=SPEED_TEST_TIMEOUT) as resp:
+                if resp.status == 200:
+                    return await resp.text()
+        return ""
+    except:
+        return ""
+
+async def get_speed(data: dict) -> dict:
+    """单链接测速入口（修复未定义的核心函数），封装缓存+测速逻辑"""
+    global CACHE
+    name = data['name']
+    url = data['url']
+    host = data['host']
+    headers = REQUEST_HEADERS.copy()
+
+    # 域名缓存逻辑：开启则优先使用缓存结果
+    if SPEED_TEST_FILTER_HOST and host in CACHE:
+        result = CACHE[host].copy()
+        result.update({'name': name, 'url': url, 'host': host})
+        return result
+
+    # 未命中缓存则执行实际测速
+    result = await get_result(url, headers)
+    result.update({'name': name, 'url': url, 'host': host})
+
+    # 缓存结果（开启域名缓存时）
+    if SPEED_TEST_FILTER_HOST and result['speed'] >= MIN_SPEED:
+        CACHE[host] = {'speed': result['speed'], 'delay': result['delay'], 'resolution': result['resolution']}
+
+    return result
+
+# ==============================================
+# 【测速核心区】修复get_result内的变量未定义问题 - 核心修复点2
+# ==============================================
 async def get_speed_with_download(url: str, headers: dict = None, session: ClientSession = None) -> dict:
     """下载测速：获取延迟、下载大小、速度"""
     start_time = time()
@@ -139,8 +191,9 @@ async def get_speed_with_download(url: str, headers: dict = None, session: Clien
         return {'speed': speed, 'delay': delay, 'size': total_size, 'time': total_time}
 
 async def get_result(url: str, headers: dict = None) -> dict:
-    """单链接测速：下载测速 + 分辨率 + m3u8解析"""
-    info = {'speed': 0, 'delay': -1, 'resolution': None}
+    """单链接测速：下载测速 + 分辨率 + m3u8解析（修复start_time未定义、补充分辨率解析）"""
+    info = {'speed': 0, 'delay': -1, 'resolution': DEFAULT_IPV6_RES}  # 初始化分辨率，避免None
+    start_time = time()  # 修复未定义的start_time变量
     try:
         url = quote(url, safe=':/?$&=@[]%').partition('$')[0]
         res_headers = await get_headers(url, headers)
@@ -157,9 +210,16 @@ async def get_result(url: str, headers: dict = None) -> dict:
                 best_playlist = max(m3u8_obj.playlists, key=lambda p: p.stream_info.bandwidth)
                 playlist_content = await get_url_content(urljoin(url, best_playlist.uri), headers)
                 if playlist_content:
-                    segment_urls = [urljoin(url, s.uri) for s in m3u8.loads(playlist_content).segments]
+                    sub_m3u8 = m3u8.loads(playlist_content)
+                    segment_urls = [urljoin(url, s.uri) for s in sub_m3u8.segments]
+                    # 解析分辨率（从m3u8流信息中提取）
+                    if best_playlist.stream_info.resolution:
+                        info['resolution'] = f"{best_playlist.stream_info.resolution[0]}x{best_playlist.stream_info.resolution[1]}"
             else:
                 segment_urls = [urljoin(url, s.uri) for s in m3u8_obj.segments]
+                # 解析分辨率（单码率m3u8）
+                if m3u8_obj.stream_info and m3u8_obj.stream_info.resolution:
+                    info['resolution'] = f"{m3u8_obj.stream_info.resolution[0]}x{m3u8_obj.stream_info.resolution[1]}"
             # 测速m3u8片段（跳过第一个初始化片段，取后续5个）
             if segment_urls:
                 sample_segs = segment_urls[1:6] if len(segment_urls) > 1 else segment_urls
@@ -171,14 +231,16 @@ async def get_result(url: str, headers: dict = None) -> dict:
                     total_size = sum(r['size'] for r in valid_res)
                     weighted_time = sum((r['size']/total_size)*r['time'] for r in valid_res)
                     info['speed'] = total_size / weighted_time / 1024 / 1024
-                    info['delay'] = int(round(sum(r['delay'] for r in valid_res if r['delay']>0)/len(valid_res)))
+                    # 计算平均延迟（过滤无效延迟）
+                    valid_delays = [r['delay'] for r in valid_res if r['delay'] > 0]
+                    info['delay'] = int(round(sum(valid_delays)/len(valid_delays))) if valid_delays else int(round((time()-start_time)*1000))
                 else:
                     info['delay'] = int(round((time()-start_time)*1000))
         else:
             # 非m3u8直接测速
             download_res = await get_speed_with_download(url, headers)
             info.update({'speed': download_res['speed'], 'delay': download_res['delay']})
-    except:
+    except Exception as e:
         pass
     return info
 
@@ -204,25 +266,38 @@ def get_sort_result(results: list[dict]) -> list[dict]:
             except:
                 continue
         valid_results.append(res)
-    # 按速度降序排序
-    return sorted(valid_results, key=lambda x: x.get('speed') or 0, reverse=True)
+    # 按速度降序排序，速度相同则按延迟升序
+    return sorted(valid_results, key=lambda x: (-(x.get('speed') or 0), x.get('delay') or 9999))
 
 async def batch_speed_test(items: list[dict]) -> list[dict]:
-    """批量测速并返回有效链接"""
+    """批量测速并返回有效链接（修复返回值类型，匹配保存函数参数）"""
     global CACHE
     CACHE = {}  # 清空缓存
-    # 构造测速任务
-    test_tasks = [{'name': item['name'], 'url': item['url'], 'host': item['url'].split('/')[2], 'ipv_type': 'ipv4'} for item in items]
+    # 构造测速任务：补充name/host/ipv_type，兼容get_speed入参
+    test_tasks = []
+    for item in items:
+        try:
+            host = urlparse(item['url']).netloc  # 改用urlparse解析host，更健壮
+            test_tasks.append({
+                'name': item['name'],
+                'url': item['url'],
+                'host': host,
+                'ipv_type': 'ipv4'
+            })
+        except:
+            continue
     # 异步批量测速
-    print(f"🚀 开始批量测速（共{len(test_tasks)}个链接）")
+    print(f"🚀 开始批量测速（共{len(test_tasks)}个有效任务）")
     tasks = [get_speed(data) for data in test_tasks]
     test_results = await asyncio.gather(*tasks, return_exceptions=False)
     # 过滤排序
     sorted_res = get_sort_result(test_results)
-    valid_links = [res['url'] for res in sorted_res]
-    print(f"✅ 测速完成，保留 {len(valid_links)} 个有效链接\n")
-    return valid_links
+    print(f"✅ 测速完成，保留 {len(sorted_res)} 个有效链接\n")
+    return sorted_res  # 返回完整字典列表，而非仅url列表
 
+# ==============================================
+# 【主函数】修复参数传递问题 - 核心修复点3
+# ==============================================
 async def main():
     """主执行流程"""
     # 打印启动信息
@@ -231,12 +306,12 @@ async def main():
     init_output_dir()
     # 2. 拉取远程文件链接
     items = parse_result_file(REMOTE_URL)
-    # 3. 批量测速
-    valid_links = await batch_speed_test(items)
-    # 4. 生成文件
-    if valid_links:
-        save_txt(valid_links)
-        save_m3u(valid_links)
+    # 3. 批量测速（返回包含name/url的有效字典列表）
+    valid_items = await batch_speed_test(items)
+    # 4. 生成文件（修复参数：传入完整字典列表，而非url列表）
+    if valid_items:
+        save_txt(valid_items)
+        save_m3u(valid_items)
     else:
         print("❌ 无有效链接，未生成文件")
     # 执行完成
@@ -245,4 +320,7 @@ async def main():
     print("=" * 60)
 
 if __name__ == "__main__":
+    # 适配Windows系统asyncio事件循环问题
+    if os.name == 'nt':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())
