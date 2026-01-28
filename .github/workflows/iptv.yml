@@ -6,7 +6,7 @@ on:
 
 permissions:
   contents: read  # 允许检出仓库代码（必要）
-  actions: write  # 包含制品上传权限（替代原无效的artifacts）
+  actions: write  # 包含制品上传权限
 
 jobs:
   run-iptv-processor:
@@ -15,16 +15,15 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 设置Python 3.13  # 核心修改：删除cache: "pip"
+      - name: 设置Python 3.13
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"  # 仅保留Python版本配置，移除缓存
+          python-version: "3.13"
 
-      - name: 安装系统依赖（FFmpeg/ffprobe）
+      - name: 安装系统依赖（FFmpeg，自动附带ffprobe）
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg ffprobe
-          ffmpeg -version
+          sudo apt-get update -y && sudo apt-get install -y ffmpeg  # 仅安装ffmpeg即可
+          ffmpeg -version && ffprobe -version  # 验证两者均安装成功
 
       - name: 安装Python依赖
         run: |
