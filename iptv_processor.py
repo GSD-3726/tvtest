@@ -27,12 +27,13 @@ URL_PATTERN = re.compile(r'https?://[-A-Za-z0-9+&@#/%?=~_|!:,.;]+[-A-Za-z0-9+&@#
 
 # 测速配置
 SPEED_TEST_TIMEOUT = 10  # 单链接测速超时（秒）
-SPEED_TEST_FILTER_HOST = False  # 按域名缓存测速结果
+SPEED_TEST_FILTER_HOST = True  # 按域名缓存测速结果
 OPEN_FILTER_RESOLUTION = True  # 开启分辨率过滤
 MIN_RESOLUTION = 720  # 最低分辨率（宽）
 MAX_RESOLUTION = 2160  # 最高分辨率（宽）
 OPEN_FILTER_SPEED = True  # 开启速度过滤
 MIN_SPEED = 1  # 最低有效速度（MB/s）
+SAMPLE_SEGMENTS = 5  # M3U8抽样片段数量
 
 # 固定配置
 M3U8_HEADERS = ['application/x-mpegurl', 'application/vnd.apple.mpegurl', 'audio/mpegurl', 'audio/x-mpegurl']
@@ -67,7 +68,10 @@ def parse_result_file(url: str) -> list[dict]:
                 continue
             if ',' not in line:
                 continue
-            name, url = line.split(',', 1)
+            parts = line.split(',', 1)
+            if len(parts) < 2:
+                continue
+            name, url = parts
             items.append({'name': name.strip(), 'url': url.strip()})
 
         if not items:
@@ -97,22 +101,20 @@ def save_m3u(items: list[dict]):
     print(f"✅ M3U文件生成：{m3u_path}（{len(items)}个频道）")
 
 # ==============================================
-# 【测速核心区】保留所有原测速优化逻辑
+# 【测速核心区】优化测速逻辑
 # ==============================================
 def print_startup_info():
     """打印启动信息和配置"""
     print("=" * 60)
-    print("🎬 IPTV链接拉取+测速工具（单文件版）")
+    print("🎬 IPTV链接拉取+测速工具（优化版）")
     print("=" * 60)
     print(f"🔧 运行配置：")
     print(f"   - 远程链接：{REMOTE_URL}")
     print(f"   - 测速超时：{SPEED_TEST_TIMEOUT}秒 | 最低速度：{MIN_SPEED}MB/s")
     print(f"   - 分辨率过滤：{MIN_RESOLUTION}x~{MAX_RESOLUTION}x | 域名缓存：{'开启' if SPEED_TEST_FILTER_HOST else '关闭'}")
+    print(f"   - M3U8抽样片段：{SAMPLE_SEGMENTS}个")
     print("=" * 60 + "\n")
 
-# ==============================================
-# 【新增缺失函数】修复未定义问题 - 核心修复点1
-# ==============================================
 async def get_headers(url: str, headers: dict = None) -> CIMultiDictProxy:
     """获取链接响应头（异步），用于判断内容类型、重定向"""
     if headers is None:
@@ -139,182 +141,288 @@ async def get_url_content(url: str, headers: dict = None) -> str:
     except:
         return ""
 
+async def get_speed_with_download(url: str, headers: dict = None, session: ClientSession = None) -> dict:
+    """下载测速：获取延迟、下载大小、速度（优化版）"""
+    start_time = time()
+    delay, total_size = -1, 0
+    created_session = False
+    
+    if session is None:
+        session = ClientSession(connector=TCPConnector(ssl=False), trust_env=True)
+        created_session = True
+    
+    try:
+        async with session.get(url, headers=headers, timeout=SPEED_TEST_TIMEOUT) as resp:
+            if resp.status == 200:
+                # 记录首字节到达时间（延迟）
+                delay = int(round((time() - start_time) * 1000))
+                
+                # 流式读取内容
+                async for chunk in resp.content.iter_chunked(8192):
+                    if chunk:
+                        total_size += len(chunk)
+    except Exception as e:
+        # 忽略错误，返回默认值
+        pass
+    finally:
+        total_time = max(time() - start_time, 0.001)  # 避免除0
+        speed = total_size / total_time / 1024 / 1024  # MB/s
+        
+        if created_session:
+            await session.close()
+            
+        return {
+            'speed': speed,
+            'delay': delay,
+            'size': total_size,
+            'time': total_time
+        }
+
+async def get_result(url: str, headers: dict = None) -> dict:
+    """单链接测速：下载测速 + 分辨率 + m3u8解析（优化版）"""
+    info = {
+        'speed': 0,
+        'delay': -1,
+        'resolution': DEFAULT_IPV6_RES
+    }
+    
+    try:
+        # 清理URL参数
+        clean_url = quote(url.split('$')[0], safe=':/?=&')
+        
+        # 获取响应头
+        res_headers = await get_headers(clean_url, headers)
+        
+        # 处理重定向
+        if location := res_headers.get('Location'):
+            return await get_result(location, headers)
+        
+        # 检查是否为M3U8
+        content_type = res_headers.get('Content-Type', '').lower()
+        is_m3u8 = any(h in content_type for h in M3U8_HEADERS)
+        
+        if is_m3u8:
+            # 获取M3U8内容
+            content = await get_url_content(clean_url, headers)
+            if not content:
+                return info
+            
+            # 解析M3U8
+            m3u8_obj = m3u8.loads(content)
+            
+            # 获取分辨率
+            resolution = DEFAULT_IPV6_RES
+            if m3u8_obj.playlists:
+                # 多码率流：选择最高码率
+                best_playlist = max(m3u8_obj.playlists, key=lambda p: p.stream_info.bandwidth)
+                if best_playlist.stream_info.resolution:
+                    w, h = best_playlist.stream_info.resolution
+                    resolution = f"{w}x{h}"
+                    
+                # 获取子播放列表
+                sub_url = urljoin(clean_url, best_playlist.uri)
+                sub_content = await get_url_content(sub_url, headers)
+                if sub_content:
+                    sub_m3u8 = m3u8.loads(sub_content)
+                    segments = sub_m3u8.segments
+                else:
+                    segments = []
+            else:
+                # 单码率流
+                segments = m3u8_obj.segments
+                if m3u8_obj.stream_info and m3u8_obj.stream_info.resolution:
+                    w, h = m3u8_obj.stream_info.resolution
+                    resolution = f"{w}x{h}"
+            
+            info['resolution'] = resolution
+            
+            # 抽样测速片段
+            if segments:
+                # 随机选择片段（避免顺序偏差）
+                sample_count = min(SAMPLE_SEGMENTS, len(segments))
+                sample_segments = segments[:sample_count]
+                
+                # 创建会话复用连接
+                async with ClientSession(connector=TCPConnector(ssl=False), trust_env=True) as session:
+                    tasks = []
+                    for seg in sample_segments:
+                        seg_url = urljoin(clean_url, seg.uri)
+                        tasks.append(get_speed_with_download(seg_url, headers, session))
+                    
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    
+                    # 计算总速度和总时间
+                    total_size = 0
+                    total_time = 0
+                    valid_delays = []
+                    
+                    for res in results:
+                        if isinstance(res, dict) and res['time'] > 0:
+                            total_size += res['size']
+                            total_time += res['time']
+                            if res['delay'] > 0:
+                                valid_delays.append(res['delay'])
+                    
+                    # 计算平均速度（总大小/总时间）
+                    if total_time > 0:
+                        info['speed'] = total_size / total_time / 1024 / 1024
+                    
+                    # 计算平均延迟
+                    if valid_delays:
+                        info['delay'] = int(round(sum(valid_delays) / len(valid_delays)))
+                    elif segments:
+                        info['delay'] = int(round((time() - time()) * 1000))  # 简化处理
+            else:
+                # 无片段时使用主URL测速
+                download_res = await get_speed_with_download(clean_url, headers)
+                info.update({
+                    'speed': download_res['speed'],
+                    'delay': download_res['delay']
+                })
+        else:
+            # 非M3U8直接测速
+            download_res = await get_speed_with_download(clean_url, headers)
+            info.update({
+                'speed': download_res['speed'],
+                'delay': download_res['delay']
+            })
+            
+    except Exception as e:
+        # 错误处理
+        pass
+    
+    return info
+
 async def get_speed(data: dict) -> dict:
-    """单链接测速入口（修复未定义的核心函数），封装缓存+测速逻辑"""
+    """单链接测速入口（封装缓存+测速逻辑）"""
     global CACHE
     name = data['name']
     url = data['url']
     host = data['host']
     headers = REQUEST_HEADERS.copy()
 
-    # 域名缓存逻辑：开启则优先使用缓存结果
+    # 域名缓存逻辑
     if SPEED_TEST_FILTER_HOST and host in CACHE:
-        result = CACHE[host].copy()
-        result.update({'name': name, 'url': url, 'host': host})
-        return result
+        cached = CACHE[host]
+        return {
+            'name': name,
+            'url': url,
+            'host': host,
+            'speed': cached['speed'],
+            'delay': cached['delay'],
+            'resolution': cached['resolution']
+        }
 
-    # 未命中缓存则执行实际测速
+    # 执行实际测速
     result = await get_result(url, headers)
-    result.update({'name': name, 'url': url, 'host': host})
+    result.update({
+        'name': name,
+        'url': url,
+        'host': host
+    })
 
-    # 缓存结果（开启域名缓存时）
+    # 缓存结果
     if SPEED_TEST_FILTER_HOST and result['speed'] >= MIN_SPEED:
-        CACHE[host] = {'speed': result['speed'], 'delay': result['delay'], 'resolution': result['resolution']}
+        CACHE[host] = {
+            'speed': result['speed'],
+            'delay': result['delay'],
+            'resolution': result['resolution']
+        }
 
     return result
-
-# ==============================================
-# 【测速核心区】修复get_result内的变量未定义问题 - 核心修复点2
-# ==============================================
-async def get_speed_with_download(url: str, headers: dict = None, session: ClientSession = None) -> dict:
-    """下载测速：获取延迟、下载大小、速度"""
-    start_time = time()
-    delay, total_size = -1, 0
-    created_session = False
-    if session is None:
-        session = ClientSession(connector=TCPConnector(ssl=False), trust_env=True)
-        created_session = True
-    try:
-        async with session.get(url, headers=headers, timeout=SPEED_TEST_TIMEOUT) as resp:
-            if resp.status == 200:
-                delay = int(round((time() - start_time) * 1000))
-                async for chunk in resp.content.iter_any():
-                    if chunk:
-                        total_size += len(chunk)
-    except:
-        pass
-    finally:
-        total_time = max(time() - start_time, 0.001)  # 避免除0
-        speed = total_size / total_time / 1024 / 1024
-        if created_session:
-            await session.close()
-        return {'speed': speed, 'delay': delay, 'size': total_size, 'time': total_time}
-
-async def get_result(url: str, headers: dict = None) -> dict:
-    """单链接测速：下载测速 + 分辨率 + m3u8解析（修复start_time未定义、补充分辨率解析）"""
-    info = {'speed': 0, 'delay': -1, 'resolution': DEFAULT_IPV6_RES}  # 初始化分辨率，避免None
-    start_time = time()  # 修复未定义的start_time变量
-    try:
-        url = quote(url, safe=':/?$&=@[]%').partition('$')[0]
-        res_headers = await get_headers(url, headers)
-        # 处理重定向
-        if location := res_headers.get('Location'):
-            return await get_result(location, headers)
-        # 解析m3u8流
-        content = await get_url_content(url, headers)
-        if content and any(h in res_headers.get('Content-Type', '').lower() for h in M3U8_HEADERS):
-            m3u8_obj = m3u8.loads(content)
-            segment_urls = []
-            # 处理多码率m3u8，选最高码率
-            if m3u8_obj.playlists:
-                best_playlist = max(m3u8_obj.playlists, key=lambda p: p.stream_info.bandwidth)
-                playlist_content = await get_url_content(urljoin(url, best_playlist.uri), headers)
-                if playlist_content:
-                    sub_m3u8 = m3u8.loads(playlist_content)
-                    segment_urls = [urljoin(url, s.uri) for s in sub_m3u8.segments]
-                    # 解析分辨率（从m3u8流信息中提取）
-                    if best_playlist.stream_info.resolution:
-                        info['resolution'] = f"{best_playlist.stream_info.resolution[0]}x{best_playlist.stream_info.resolution[1]}"
-            else:
-                segment_urls = [urljoin(url, s.uri) for s in m3u8_obj.segments]
-                # 解析分辨率（单码率m3u8）
-                if m3u8_obj.stream_info and m3u8_obj.stream_info.resolution:
-                    info['resolution'] = f"{m3u8_obj.stream_info.resolution[0]}x{m3u8_obj.stream_info.resolution[1]}"
-            # 测速m3u8片段（跳过第一个初始化片段，取后续5个）
-            if segment_urls:
-                sample_segs = segment_urls[1:6] if len(segment_urls) > 1 else segment_urls
-                tasks = [get_speed_with_download(seg, headers) for seg in sample_segs]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                # 过滤有效结果，按大小加权计算
-                valid_res = [r for r in results if isinstance(r, dict) and r['time'] > 0 and r['size'] > 0]
-                if valid_res:
-                    total_size = sum(r['size'] for r in valid_res)
-                    weighted_time = sum((r['size']/total_size)*r['time'] for r in valid_res)
-                    info['speed'] = total_size / weighted_time / 1024 / 1024
-                    # 计算平均延迟（过滤无效延迟）
-                    valid_delays = [r['delay'] for r in valid_res if r['delay'] > 0]
-                    info['delay'] = int(round(sum(valid_delays)/len(valid_delays))) if valid_delays else int(round((time()-start_time)*1000))
-                else:
-                    info['delay'] = int(round((time()-start_time)*1000))
-        else:
-            # 非m3u8直接测速
-            download_res = await get_speed_with_download(url, headers)
-            info.update({'speed': download_res['speed'], 'delay': download_res['delay']})
-    except Exception as e:
-        pass
-    return info
 
 def get_sort_result(results: list[dict]) -> list[dict]:
     """过滤并排序测速结果：按速度从快到慢，过滤无效链接"""
     valid_results = []
+    
     for res in results:
         speed = res.get('speed') or 0
         delay = res.get('delay')
         reso = res.get('resolution')
-        # 过滤延迟无效的链接
+        
+        # 跳过无效延迟
         if delay == -1:
             continue
-        # 过滤速度不达标
+            
+        # 速度过滤
         if OPEN_FILTER_SPEED and speed < MIN_SPEED:
             continue
-        # 过滤分辨率不达标
+            
+        # 分辨率过滤
         if OPEN_FILTER_RESOLUTION and reso and reso != "音频流":
             try:
-                res_w = int(reso.split('x')[0])
-                if res_w < MIN_RESOLUTION or res_w > MAX_RESOLUTION:
-                    continue
+                # 处理分辨率格式（可能包含空格等）
+                reso_clean = reso.replace(' ', '')
+                if 'x' in reso_clean:
+                    res_w = int(reso_clean.split('x')[0])
+                    if res_w < MIN_RESOLUTION or res_w > MAX_RESOLUTION:
+                        continue
             except:
-                continue
+                # 解析失败保留
+                pass
+                
         valid_results.append(res)
+    
     # 按速度降序排序，速度相同则按延迟升序
-    return sorted(valid_results, key=lambda x: (-(x.get('speed') or 0), x.get('delay') or 9999))
+    return sorted(
+        valid_results, 
+        key=lambda x: (-(x.get('speed') or 0), x.get('delay') or 9999)
+    )
 
 async def batch_speed_test(items: list[dict]) -> list[dict]:
-    """批量测速并返回有效链接（修复返回值类型，匹配保存函数参数）"""
+    """批量测速并返回有效链接"""
     global CACHE
     CACHE = {}  # 清空缓存
-    # 构造测速任务：补充name/host/ipv_type，兼容get_speed入参
+    
+    # 准备测速任务
     test_tasks = []
     for item in items:
         try:
-            host = urlparse(item['url']).netloc  # 改用urlparse解析host，更健壮
+            parsed = urlparse(item['url'])
+            host = parsed.netloc
             test_tasks.append({
                 'name': item['name'],
                 'url': item['url'],
-                'host': host,
-                'ipv_type': 'ipv4'
+                'host': host
             })
         except:
             continue
+    
     # 异步批量测速
     print(f"🚀 开始批量测速（共{len(test_tasks)}个有效任务）")
     tasks = [get_speed(data) for data in test_tasks]
     test_results = await asyncio.gather(*tasks, return_exceptions=False)
+    
     # 过滤排序
     sorted_res = get_sort_result(test_results)
     print(f"✅ 测速完成，保留 {len(sorted_res)} 个有效链接\n")
-    return sorted_res  # 返回完整字典列表，而非仅url列表
+    return sorted_res
 
 # ==============================================
-# 【主函数】修复参数传递问题 - 核心修复点3
+# 【主函数】
 # ==============================================
 async def main():
     """主执行流程"""
-    # 打印启动信息
     print_startup_info()
-    # 1. 初始化目录
     init_output_dir()
-    # 2. 拉取远程文件链接
-    items = parse_result_file(REMOTE_URL)
-    # 3. 批量测速（返回包含name/url的有效字典列表）
-    valid_items = await batch_speed_test(items)
-    # 4. 生成文件（修复参数：传入完整字典列表，而非url列表）
-    if valid_items:
-        save_txt(valid_items)
-        save_m3u(valid_items)
-    else:
-        print("❌ 无有效链接，未生成文件")
-    # 执行完成
+    
+    try:
+        # 1. 拉取远程文件链接
+        items = parse_result_file(REMOTE_URL)
+        
+        # 2. 批量测速
+        valid_items = await batch_speed_test(items)
+        
+        # 3. 生成文件
+        if valid_items:
+            save_txt(valid_items)
+            save_m3u(valid_items)
+        else:
+            print("❌ 无有效链接，未生成文件")
+            
+    except Exception as e:
+        print(f"❌ 程序执行出错: {str(e)}")
+    
     print("\n" + "=" * 60)
     print("🎉 所有任务执行完成！输出文件在：output 目录")
     print("=" * 60)
