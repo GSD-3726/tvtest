@@ -1,15 +1,16 @@
 import asyncio
 import http.cookies
 import json
-import os
 import re
 import subprocess
+import os
 import requests
 from time import time
 from urllib.parse import quote, urljoin
+
+import m3u8
 from aiohttp import ClientSession, TCPConnector
 from multidict import CIMultiDictProxy
-import m3u8
 
 # ==============================================
 # 【核心配置区】可直接修改，无需改下方代码
@@ -50,66 +51,67 @@ CACHE = {}  # 测速全局缓存
 # ==============================================
 # 【工具函数区】拉取链接/生成文件/初始化
 # ==============================================
-
-def parse_tvbox_lines(text: str) -> list[dict]:
-    """
-    解析 TVBox / IPTV CSV 格式
-    返回：[{name, url}]
-    """
-    items = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or '#genre#' in line:
-            continue
-        if ',' not in line:
-            continue
-        name, url = line.split(',', 1)
-        url = url.strip()
-        if url.startswith(('http://', 'https://')):
-            items.append({'name': name.strip(), 'url': url})
-    return items
-
 def init_output_dir():
     """初始化输出目录"""
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR)
     print(f"✅ 输出目录初始化完成：{OUTPUT_DIR}")
 
-def get_remote_links() -> list[dict]:
+def get_remote_links() -> list[str]:
     """拉取远程txt中的所有链接，去重并保留原顺序"""
     try:
         print(f"🔍 拉取远程链接：{REMOTE_URL}")
         resp = requests.get(REMOTE_URL, headers=REQUEST_HEADERS, timeout=30)
         resp.raise_for_status()
-        items = parse_tvbox_lines(resp.text)
-        if not items:
+        links = list(dict.fromkeys(URL_PATTERN.findall(resp.text)))
+        if not links:
             raise Exception("未匹配到任何有效链接")
-        print(f"✅ 成功拉取 {len(items)} 个有效链接")
-        return items
+        print(f"✅ 成功拉取 {len(links)} 个有效链接")
+        return links
     except Exception as e:
         print(f"❌ 拉取链接失败：{str(e)}")
         raise SystemExit(1)
 
-def save_txt(items: list[dict]):
+def save_txt(links: list[str]):
     """按原格式保存TXT文件（每行一个链接）"""
     txt_path = os.path.join(OUTPUT_DIR, TXT_FILENAME)
     with open(txt_path, 'w', encoding='utf-8') as f:
-        for item in items:
-            f.write(f"{item['name']},{item['url']}\n")
-    print(f"✅ TXT文件生成：{txt_path}（{len(items)}个链接）")
+        f.write('\n'.join(links))
+    print(f"✅ TXT文件生成：{txt_path}（{len(links)}个链接）")
 
-def save_m3u(items: list[dict]):
+def save_m3u(links: list[str]):
     """生成标准IPTV M3U文件（适配VLC/TVBox/PotPlayer，含EPG）"""
     m3u_path = os.path.join(OUTPUT_DIR, M3U_FILENAME)
     with open(m3u_path, 'w', encoding='utf-8') as f:
         f.write("#EXTM3U x-tvg-url=\"https://epg.112114.xyz/epg.xml.gz\"\n\n")
-        for idx, item in enumerate(items, 1):
-            f.write(f"#EXTINF:-1,{item['name']}\n{item['url']}\n\n")
-    print(f"✅ M3U文件生成：{m3u_path}（{len(items)}个频道）")
+        for idx, link in enumerate(links, 1):
+            f.write(f"#EXTINF:-1,IPTV Channel {idx}\n{link}\n\n")
+    print(f"✅ M3U文件生成：{m3u_path}（{len(links)}个频道）")
 
 # ==============================================
 # 【测速核心区】保留所有原测速优化逻辑
 # ==============================================
+def print_startup_info():
+    """打印启动信息和配置"""
+    print("=" * 60)
+    print("🎬 IPTV链接拉取+测速工具（单文件版）")
+    print("=" * 60)
+    print(f"🔧 运行配置：")
+    print(f"   - 远程链接：{REMOTE_URL}")
+    print(f"   - 测速超时：{SPEED_TEST_TIMEOUT}秒 | 最低速度：{MIN_SPEED}MB/s")
+    print(f"   - 分辨率过滤：{MIN_RESOLUTION}x~{MAX_RESOLUTION}x | 域名缓存：{'开启' if SPEED_TEST_FILTER_HOST else '关闭'}")
+    print(f"📦 依赖检测：")
+    ffmpeg_ok = check_ffmpeg_installed_status()
+    print(f"   - FFmpeg：{'✅ 已安装' if ffmpeg_ok else '❌ 未安装（部分功能受限）'}")
+    print("=" * 60 + "\n")
+
+def check_ffmpeg_installed_status() -> bool:
+    """检查FFmpeg是否安装"""
+    try:
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return True
+    except (FileNotFoundError, Exception):
+        return False
 
 async def get_speed_with_download(url: str, headers: dict = None, session: ClientSession = None) -> dict:
     """下载测速：获取延迟、下载大小、速度"""
@@ -135,6 +137,71 @@ async def get_speed_with_download(url: str, headers: dict = None, session: Clien
             await session.close()
         return {'speed': speed, 'delay': delay, 'size': total_size, 'time': total_time}
 
+async def get_headers(url: str, headers: dict = None, session: ClientSession = None) -> dict:
+    """获取URL响应头"""
+    created_session = False
+    if session is None:
+        session = ClientSession(connector=TCPConnector(ssl=False), trust_env=True)
+        created_session = True
+    res_headers = {}
+    try:
+        async with session.head(url, headers=headers, timeout=5) as resp:
+            res_headers = dict(resp.headers)
+    except:
+        pass
+    finally:
+        if created_session:
+            await session.close()
+        return res_headers
+
+async def get_url_content(url: str, headers: dict = None, session: ClientSession = None) -> str:
+    """获取URL文本内容"""
+    created_session = False
+    if session is None:
+        session = ClientSession(connector=TCPConnector(ssl=False), trust_env=True)
+        created_session = True
+    content = ""
+    try:
+        async with session.get(url, headers=headers, timeout=SPEED_TEST_TIMEOUT) as resp:
+            if resp.status == 200:
+                content = await resp.text()
+    except:
+        pass
+    finally:
+        if created_session:
+            await session.close()
+        return content
+
+# ==============================================
+# 【测速入口】get_speed 函数定义
+# ==============================================
+async def get_speed(data: dict, headers: dict = None) -> dict:
+    """单链接测速入口：带缓存"""
+    url = data['url']
+    result = {'speed': 0, 'delay': -1, 'resolution': None, 'url': url}
+    use_headers = {**REQUEST_HEADERS, **(headers or {})}
+    try:
+        # 生成缓存key（域名/完整URL）
+        cache_key = data.get('host') or url.split('/')[2] if SPEED_TEST_FILTER_HOST else url
+        # 从缓存获取
+        if cache_key in CACHE:
+            result = get_avg_result(CACHE[cache_key])
+            result['url'] = url
+        else:
+            # IPv6处理
+            if data.get('ipv_type') == "ipv6" and IPV6_SUPPORT:
+                result.update(DEFAULT_IPV6_RESULT)
+            else:
+                result.update(await get_result(url, use_headers))
+            # 加入缓存
+            if cache_key:
+                CACHE.setdefault(cache_key, []).append(result)
+    finally:
+        return result
+
+# ==============================================
+# 【批量测速】
+# ==============================================
 async def batch_speed_test(items: list[dict]) -> list[dict]:
     """批量测速并返回有效链接"""
     global CACHE
@@ -151,22 +218,23 @@ async def batch_speed_test(items: list[dict]) -> list[dict]:
     print(f"✅ 测速完成，保留 {len(valid_items)} 个有效链接\n")
     return valid_items
 
+# ==============================================
+# 【主程序入口】
+# ==============================================
 async def main():
     """主执行流程"""
     # 打印启动信息
-    print("=" * 60)
-    print("🎬 IPTV链接拉取+测速工具（TVBox专用版）")
-    print("=" * 60)
+    print_startup_info()
     # 1. 初始化目录
     init_output_dir()
     # 2. 拉取远程链接
-    items = get_remote_links()
+    raw_links = get_remote_links()
     # 3. 批量测速
-    valid_items = await batch_speed_test(items)
+    valid_links = await batch_speed_test(raw_links)
     # 4. 生成文件
-    if valid_items:
-        save_txt(valid_items)
-        save_m3u(valid_items)
+    if valid_links:
+        save_txt(valid_links)
+        save_m3u(valid_links)
     else:
         print("❌ 无有效链接，未生成文件")
     # 执行完成
