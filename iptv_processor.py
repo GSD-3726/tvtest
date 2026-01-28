@@ -15,8 +15,9 @@ from multidict import CIMultiDictProxy
 # ==============================================
 # 【核心配置区】可直接修改，无需改下方代码
 # ==============================================
-# 本地文件路径（可修改为远程链接）
-RESULT_FILE_PATH = "https://gh-proxy.com/https://raw.githubusercontent.com/GSD-3726/IPTV/master/output/result.txt"
+# 本地文件路径或远程链接
+RESULT_FILE_PATH = '/mnt/data/result.txt'  # 本地文件路径
+REMOTE_URL = "https://gh-proxy.com/https://raw.githubusercontent.com/GSD-3726/IPTV/master/output/result.txt"  # 远程链接
 OUTPUT_DIR = "output"
 TXT_FILENAME = "result.txt"
 M3U_FILENAME = "iptv.m3u"
@@ -55,15 +56,26 @@ def parse_result_file(file_path: str) -> list[dict]:
     """解析本地文本文件，返回包含{'name', 'url'}的字典列表"""
     items = []
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line or '#genre#' in line:
-                    continue
-                if ',' not in line:
-                    continue
-                name, url = line.split(',', 1)
-                items.append({'name': name.strip(), 'url': url.strip()})
+        if file_path.startswith("http"):  # 如果是URL（远程链接）
+            print(f"🔍 正在拉取远程文件：{file_path}")
+            resp = requests.get(file_path, headers=REQUEST_HEADERS, timeout=30)
+            resp.raise_for_status()
+            file_content = resp.text
+        else:  # 如果是本地文件路径
+            print(f"🔍 正在读取本地文件：{file_path}")
+            with open(file_path, 'r', encoding='utf-8') as f:
+                file_content = f.read()
+
+        # 解析文件内容
+        for line in file_content.splitlines():
+            line = line.strip()
+            if not line or '#genre#' in line:
+                continue
+            if ',' not in line:
+                continue
+            name, url = line.split(',', 1)
+            items.append({'name': name.strip(), 'url': url.strip()})
+
         if not items:
             raise ValueError("未匹配到任何有效链接")
         print(f"✅ 成功解析文件，找到 {len(items)} 个有效链接")
@@ -223,7 +235,7 @@ async def main():
     # 1. 初始化目录
     init_output_dir()
     # 2. 拉取本地文件链接
-    items = parse_result_file(RESULT_FILE_PATH)
+    items = parse_result_file(RESULT_FILE_PATH if RESULT_FILE_PATH else REMOTE_URL)
     # 3. 批量测速
     valid_links = await batch_speed_test(items)
     # 4. 生成文件
