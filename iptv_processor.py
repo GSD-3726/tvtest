@@ -182,29 +182,30 @@ async def get_result(url: str, headers: dict = None) -> dict:
         pass
     return info
 
-async def get_speed(data: dict, headers: dict = None) -> dict:
-    """单链接测速入口：带缓存"""
-    url = data['url']
-    result = {'speed': 0, 'delay': -1, 'resolution': None, 'url': url}
-    use_headers = {**REQUEST_HEADERS, **(headers or {})}
-    try:
-        # 生成缓存key（域名/完整URL）
-        cache_key = data.get('host') or url.split('/')[2] if SPEED_TEST_FILTER_HOST else url
-        # 从缓存获取
-        if cache_key in CACHE:
-            result = get_avg_result(CACHE[cache_key])
-            result['url'] = url
-        else:
-            # IPv6处理
-            if data.get('ipv_type') == "ipv6" and IPV6_SUPPORT:
-                result.update(DEFAULT_IPV6_RESULT)
-            else:
-                result.update(await get_result(url, use_headers))
-            # 加入缓存
-            if cache_key:
-                CACHE.setdefault(cache_key, []).append(result)
-    finally:
-        return result
+def get_sort_result(results: list[dict]) -> list[dict]:
+    """过滤并排序测速结果：按速度从快到慢，过滤无效链接"""
+    valid_results = []
+    for res in results:
+        speed = res.get('speed') or 0
+        delay = res.get('delay')
+        reso = res.get('resolution')
+        # 过滤延迟无效的链接
+        if delay == -1:
+            continue
+        # 过滤速度不达标
+        if OPEN_FILTER_SPEED and speed < MIN_SPEED:
+            continue
+        # 过滤分辨率不达标
+        if OPEN_FILTER_RESOLUTION and reso and reso != "音频流":
+            try:
+                res_w = int(reso.split('x')[0])
+                if res_w < MIN_RESOLUTION or res_w > MAX_RESOLUTION:
+                    continue
+            except:
+                continue
+        valid_results.append(res)
+    # 按速度降序排序
+    return sorted(valid_results, key=lambda x: x.get('speed') or 0, reverse=True)
 
 async def batch_speed_test(items: list[dict]) -> list[dict]:
     """批量测速并返回有效链接"""
