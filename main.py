@@ -7,6 +7,16 @@ import re
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
+import os
+import xml.etree.ElementTree as ET
+
+# -------------------------- 核心配置修改：替换为iptv-org/epg仓库 --------------------------
+# iptv-org/epg 公共EPG源（XMLTV格式，全局通用）
+IPTV_ORG_EPG_BASE_URL = "https://epg.iptv-org.ru/"
+# 备用：直接拉取仓库打包好的EPG文件（gzip压缩）
+IPTV_ORG_EPG_GZ_URL = "https://github.com/iptv-org/epg/raw/master/epg.xml.gz"
+# 本地缓存EPG文件路径（避免重复请求）
+LOCAL_EPG_CACHE = "epg.xml"
 
 thread_mum = 10
 headers = {
@@ -42,7 +52,8 @@ LIVE = {'热门': 'e7716fea6aa1483c80cfc10b7795fcb8', '体育': '7538163cdac0443
 # -------------------------- 配置 --------------------------
 m3u_path = 'migu.m3u'
 txt_path = 'migu.txt'
-M3U_HEADER = '#EXTM3U x-tvg-url="https://raw.githubusercontent.com/GSD-3726/IPTV/refs/heads/master/output/epg/epg.gz"\n'
+# 修改M3U头部：使用iptv-org的公共EPG源
+M3U_HEADER = f'#EXTM3U x-tvg-url="{IPTV_ORG_EPG_GZ_URL}"\n'
 
 # 使用字典存储频道数据
 channels_dict = {}  # key: 频道名, value: [m3u_item, txt_item, category, sort_key]
@@ -52,6 +63,78 @@ FLAG = 0
 appVersion = "2600034600"
 appVersionID = appVersion + "-99000-201600010010028"
 
+# -------------------------- 新增：iptv-org EPG频道名映射 --------------------------
+def get_iptv_org_tvg_name(channel_name):
+    """
+    适配iptv-org/epg的频道命名规范，返回标准tvg-name（保证EPG匹配）
+    参考：https://github.com/iptv-org/epg/tree/master/epg/sites
+    """
+    # 央视频道映射（iptv-org规范：CCTV-1、CCTV-5+ 等）
+    cctv_map = {
+        "CCTV1": "CCTV-1",
+        "CCTV2": "CCTV-2",
+        "CCTV3": "CCTV-3",
+        "CCTV4": "CCTV-4",
+        "CCTV5": "CCTV-5",
+        "CCTV5+": "CCTV-5+",
+        "CCTV6": "CCTV-6",
+        "CCTV7": "CCTV-7",
+        "CCTV8": "CCTV-8",
+        "CCTV9": "CCTV-9",
+        "CCTV10": "CCTV-10",
+        "CCTV11": "CCTV-11",
+        "CCTV12": "CCTV-12",
+        "CCTV13": "CCTV-13",
+        "CCTV14": "CCTV-14",
+        "CCTV15": "CCTV-15",
+        "CCTV16": "CCTV-16",
+        "CCTV17": "CCTV-17",
+        "CCTV4K": "CCTV-4K",
+        "CCTV8K": "CCTV-8K",
+        "CGTN": "CGTN",
+        "CGTN法语": "CGTN-Français",
+        "CGTN西班牙语": "CGTN-Español",
+        "CGTN俄语": "CGTN-Pусский",
+        "CGTN阿拉伯语": "CGTN-العربية",
+        "CGTN英语纪录": "CGTN-Documentary"
+    }
+    
+    # 标准化输入频道名
+    std_name = channel_name.strip().replace("CCTV ", "CCTV").replace("CCTV-", "CCTV")
+    
+    # 优先匹配央视映射
+    for raw_name, tvg_name in cctv_map.items():
+        if raw_name in std_name:
+            return tvg_name
+    
+    # 卫视频道（iptv-org规范：如 湖南卫视、浙江卫视 等，直接用中文）
+    satellite_keywords = ["卫视", "湖南", "浙江", "江苏", "东方", "北京", "安徽", "山东", "广东", "天津"]
+    for kw in satellite_keywords:
+        if kw in std_name:
+            return std_name
+    
+    # 其他频道：直接返回标准化名称（保证和iptv-org的EPG频道名一致）
+    return std_name
+
+def download_iptv_org_epg_cache():
+    """
+    可选：预下载iptv-org的EPG文件到本地（避免M3U远程加载失败）
+    """
+    if os.path.exists(LOCAL_EPG_CACHE):
+        print(f"✅ 本地EPG缓存已存在：{LOCAL_EPG_CACHE}")
+        return
+    
+    try:
+        print(f"📥 正在下载iptv-org EPG文件...")
+        # 先下载gzip压缩包并解压
+        import gzip
+        resp = requests.get(IPTV_ORG_EPG_GZ_URL, timeout=30)
+        with gzip.open(resp.raw, 'rb') as f_in:
+            with open(LOCAL_EPG_CACHE, 'wb') as f_out:
+                f_out.write(f_in.read())
+        print(f"✅ 本地EPG缓存下载完成：{LOCAL_EPG_CACHE}")
+    except Exception as e:
+        print(f"⚠️ 本地EPG缓存下载失败：{e}")
 
 def extract_cctv_number(channel_name):
     """提取CCTV频道数字作为排序键"""
@@ -339,8 +422,8 @@ def append_All_Live(live, flag, data):
             z = 1
             while z <= 6:
                 obj = requests.get(playurl, allow_redirects=False)
-                location = obj.headers["Location"]
-                if location == "" or location is None:
+                location = obj.headers.get("Location", "")
+                if not location:
                     continue
                 if location.startswith("http://hlsz"):
                     playurl = location
@@ -361,21 +444,22 @@ def append_All_Live(live, flag, data):
             # 获取排序键
             sort_key = get_sort_key(ch_name)
             
-            # 【核心修改】配置GitHub远程EPG logo URL（稳定仓库，覆盖所有频道）
-            epg_logo_base = "https://raw.githubusercontent.com/GSD-3726/IPTV/refs/heads/master/output/logo/"
-            # 标准化频道名（适配仓库命名：去横杠/空格/特殊符号，避免404）
-            standard_name = ch_name.replace('CCTV-', 'CCTV').replace(' ', '').replace('·', '').replace('—', '').replace('–', '')
-            tvg_logo = f"{epg_logo_base}{standard_name}.png"
+            # 核心修改：1. 适配iptv-org的tvg-name（保证EPG匹配）
+            tvg_name = get_iptv_org_tvg_name(ch_name)
+            # 核心修改：2. 使用iptv-org仓库的logo（可选，也可保留原logo逻辑）
+            epg_logo_base = "https://raw.githubusercontent.com/iptv-org/iptv/refs/heads/master/logos/"
+            standard_logo_name = tvg_name.replace("CCTV-", "cctv-").replace("+", "plus").lower()
+            tvg_logo = f"{epg_logo_base}{standard_logo_name}.png"
             
-            # 构造m3u条目（已包含有效远程EPG图片）
-            m3u_item = f'#EXTINF:-1 tvg-name="{ch_name}" tvg-logo="{tvg_logo}" group-title="{category}",{ch_name}\n{playurl}\n'
+            # 构造m3u条目（适配iptv-org EPG）
+            m3u_item = f'#EXTINF:-1 tvg-name="{tvg_name}" tvg-logo="{tvg_logo}" group-title="{category}",{ch_name}\n{playurl}\n'
             
             # 构造txt条目
             txt_item = f"{ch_name},{playurl}\n"
             
             # 存储到字典
             channels_dict[ch_name] = [m3u_item, txt_item, category, sort_key]
-            print(f'频道 [{ch_name}]【{category}】更新成功！(已配置EPG图片)')
+            print(f'频道 [{ch_name}]【{category}】更新成功！(tvg-name: {tvg_name}, EPG源: iptv-org)')
         else:
             print(f'频道 [{data["name"]}] 更新失败！')
     except Exception as e:
@@ -395,13 +479,16 @@ def update(live, url):
 
 
 def main():
+    # 可选：预下载iptv-org的EPG到本地（提升稳定性）
+    download_iptv_org_epg_cache()
+    
     # 1. 初始化文件
     writefile(m3u_path, M3U_HEADER, 'w')
     writefile(txt_path, "", 'w')
     
     # 2. 遍历爬取
     for live in lives:
-        print(f"分类 ----- [{live}] ----- 开始更新. . .")
+        print(f"\n分类 ----- [{live}] ----- 开始更新. . .")
         url = f'https://program-sc.miguvideo.com/live/v2/tv-data/{LIVE[live]}'
         update(live, url)
     
@@ -450,7 +537,7 @@ def main():
             category_stats[category] = 0
     
     print(f"\n✅ 双格式文件生成完成！")
-    print(f"📁 M3U格式：{m3u_path}")
+    print(f"📁 M3U格式：{m3u_path} (EPG源: {IPTV_ORG_EPG_GZ_URL})")
     print(f"📁 TXT格式：{txt_path}")
     print(f"📊 总计频道数：{total_channels}")
     
