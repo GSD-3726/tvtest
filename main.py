@@ -4,18 +4,15 @@ import time
 import random
 import hashlib
 import re
+import unicodedata  # 新增：用于中文字符归一化，保证卫视频道首字母排序准确
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 import os
 import xml.etree.ElementTree as ET
 
-# -------------------------- 核心配置修改：替换为iptv-org/epg仓库 --------------------------
-# iptv-org/epg 公共EPG源（XMLTV格式，全局通用）
-IPTV_ORG_EPG_BASE_URL = "https://epg.iptv-org.ru/"
-# 备用：直接拉取仓库打包好的EPG文件（gzip压缩）
-IPTV_ORG_EPG_GZ_URL = "https://github.com/iptv-org/epg/raw/master/epg.xml.gz"
-# 本地缓存EPG文件路径（避免重复请求）
+# -------------------------- 核心配置：移除所有EPG相关配置 --------------------------
+# 本地缓存路径（保留，不影响核心逻辑）
 LOCAL_EPG_CACHE = "epg.xml"
 
 thread_mum = 10
@@ -52,8 +49,8 @@ LIVE = {'热门': 'e7716fea6aa1483c80cfc10b7795fcb8', '体育': '7538163cdac0443
 # -------------------------- 配置 --------------------------
 m3u_path = 'migu.m3u'
 txt_path = 'migu.txt'
-# 修改M3U头部：使用iptv-org的公共EPG源
-M3U_HEADER = f'#EXTM3U x-tvg-url="{IPTV_ORG_EPG_GZ_URL}"\n'
+# 关键修改1：移除EPG源，使用标准M3U头部
+M3U_HEADER = f'#EXTM3U\n'
 
 # 使用字典存储频道数据
 channels_dict = {}  # key: 频道名, value: [m3u_item, txt_item, category, sort_key]
@@ -63,78 +60,6 @@ FLAG = 0
 appVersion = "2600034600"
 appVersionID = appVersion + "-99000-201600010010028"
 
-# -------------------------- 新增：iptv-org EPG频道名映射 --------------------------
-def get_iptv_org_tvg_name(channel_name):
-    """
-    适配iptv-org/epg的频道命名规范，返回标准tvg-name（保证EPG匹配）
-    参考：https://github.com/iptv-org/epg/tree/master/epg/sites
-    """
-    # 央视频道映射（iptv-org规范：CCTV-1、CCTV-5+ 等）
-    cctv_map = {
-        "CCTV1": "CCTV-1",
-        "CCTV2": "CCTV-2",
-        "CCTV3": "CCTV-3",
-        "CCTV4": "CCTV-4",
-        "CCTV5": "CCTV-5",
-        "CCTV5+": "CCTV-5+",
-        "CCTV6": "CCTV-6",
-        "CCTV7": "CCTV-7",
-        "CCTV8": "CCTV-8",
-        "CCTV9": "CCTV-9",
-        "CCTV10": "CCTV-10",
-        "CCTV11": "CCTV-11",
-        "CCTV12": "CCTV-12",
-        "CCTV13": "CCTV-13",
-        "CCTV14": "CCTV-14",
-        "CCTV15": "CCTV-15",
-        "CCTV16": "CCTV-16",
-        "CCTV17": "CCTV-17",
-        "CCTV4K": "CCTV-4K",
-        "CCTV8K": "CCTV-8K",
-        "CGTN": "CGTN",
-        "CGTN法语": "CGTN-Français",
-        "CGTN西班牙语": "CGTN-Español",
-        "CGTN俄语": "CGTN-Pусский",
-        "CGTN阿拉伯语": "CGTN-العربية",
-        "CGTN英语纪录": "CGTN-Documentary"
-    }
-    
-    # 标准化输入频道名
-    std_name = channel_name.strip().replace("CCTV ", "CCTV").replace("CCTV-", "CCTV")
-    
-    # 优先匹配央视映射
-    for raw_name, tvg_name in cctv_map.items():
-        if raw_name in std_name:
-            return tvg_name
-    
-    # 卫视频道（iptv-org规范：如 湖南卫视、浙江卫视 等，直接用中文）
-    satellite_keywords = ["卫视", "湖南", "浙江", "江苏", "东方", "北京", "安徽", "山东", "广东", "天津"]
-    for kw in satellite_keywords:
-        if kw in std_name:
-            return std_name
-    
-    # 其他频道：直接返回标准化名称（保证和iptv-org的EPG频道名一致）
-    return std_name
-
-def download_iptv_org_epg_cache():
-    """
-    可选：预下载iptv-org的EPG文件到本地（避免M3U远程加载失败）
-    """
-    if os.path.exists(LOCAL_EPG_CACHE):
-        print(f"✅ 本地EPG缓存已存在：{LOCAL_EPG_CACHE}")
-        return
-    
-    try:
-        print(f"📥 正在下载iptv-org EPG文件...")
-        # 先下载gzip压缩包并解压
-        import gzip
-        resp = requests.get(IPTV_ORG_EPG_GZ_URL, timeout=30)
-        with gzip.open(resp.raw, 'rb') as f_in:
-            with open(LOCAL_EPG_CACHE, 'wb') as f_out:
-                f_out.write(f_in.read())
-        print(f"✅ 本地EPG缓存下载完成：{LOCAL_EPG_CACHE}")
-    except Exception as e:
-        print(f"⚠️ 本地EPG缓存下载失败：{e}")
 
 def extract_cctv_number(channel_name):
     """提取CCTV频道数字作为排序键"""
@@ -167,14 +92,46 @@ def extract_cctv_number(channel_name):
     return 9999  # 其他频道
 
 
+def extract_panda_number(channel_name):
+    """新增：提取熊猫频道数字作为排序键（匹配「熊猫X」格式）"""
+    match = re.search(r'熊猫(\d+)', channel_name)
+    if match:
+        try:
+            return int(match.group(1))  # 提取数字转整型，实现纯数字升序
+        except:
+            return 999  # 异常情况排最后
+    return 9999  # 非数字熊猫频道排最后
+
+
+def extract_satellite_first_char(channel_name):
+    """新增：提取卫视频道名称第一个字符（归一化），用于首字母升序排序"""
+    if not channel_name:
+        return 'z'  # 空名称排最后
+    # 提取第一个字符并做Unicode归一化，避免全角/半角/特殊编码干扰排序
+    first_char = channel_name[0]
+    normalized_char = unicodedata.normalize('NFKC', first_char)
+    return normalized_char
+
+
 def get_sort_key(channel_name):
-    """获取排序键：CCTV频道按数字，其他频道按名称"""
-    # 提取CCTV数字
+    """核心修改：排序键生成，优先级：CCTV→熊猫→卫视→其他"""
+    # 1. CCTV频道（保留原有规则，不改动）
     if 'CCTV' in channel_name:
         cctv_num = extract_cctv_number(channel_name)
-        return (0, cctv_num, channel_name)  # 0表示CCTV频道
-    else:
-        return (1, channel_name)  # 1表示其他频道
+        return (0, cctv_num, channel_name)  # 0：最高优先级
+    
+    # 2. 熊猫频道（新增：按提取的数字升序）
+    if '熊猫' in channel_name:
+        panda_num = extract_panda_number(channel_name)
+        return (1, panda_num, channel_name)  # 1：次高优先级
+    
+    # 3. 卫视频道（新增：按首字母升序，首字母相同按名称）
+    if is_satellite_channel(channel_name):
+        first_char = extract_satellite_first_char(channel_name)
+        return (2, first_char, channel_name)  # 2：中等优先级
+    
+    # 4. 其他频道（保留原有规则，不改动）
+    return (3, channel_name)  # 3：最低优先级
 
 
 def is_cctv_channel(channel_name):
@@ -192,28 +149,28 @@ def smart_classify_5_categories(channel_name):
     # 先判断是否已在字典中（去重）
     if channel_name in channels_dict:
         return None
-    
+
     # 1. 熊猫频道（独立分类）
     if '熊猫' in channel_name:
         return '🐼熊猫频道'
-    
+
     # 2. 央视频道
     if is_cctv_channel(channel_name):
         return '📺央视频道'
-    
+
     # 3. 卫视频道
     if is_satellite_channel(channel_name):
         return '📡卫视频道'
-    
+
     # 4. 影音娱乐（包含影视、少儿、综艺等）
     lower_name = channel_name.lower()
-    entertainment_keywords = ['电影', '影视', '影院', '影迷', '少儿', '卡通', '动漫', '动画', 
-                             '综艺', '戏曲', '音乐', '秦腔', '嘉佳', '优漫', '新动漫', '经典动画']
-    
+    entertainment_keywords = ['电影', '影视', '影院', '影迷', '少儿', '卡通', '动漫', '动画',
+                              '综艺', '戏曲', '音乐', '秦腔', '嘉佳', '优漫', '新动漫', '经典动画']
+
     for keyword in entertainment_keywords:
         if keyword in channel_name:
             return '🎬影音娱乐'
-    
+
     # 5. 生活资讯（默认分类，包含新闻、体育、教育、纪实、地方台等）
     return '📰生活资讯'
 
@@ -270,7 +227,7 @@ def get_content(pid):
         "sec-fetch-dest": "empty",
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-origin",
-        "cookie": "apipost-token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwYXlsb2FkIjp7InVzZXJfaWQiOjM5NDY2NDM3MTIyMzAwMzEzNywidGltZSI6MTc2NTYzMjU2NSwidXVpZCI6ImJlNDJjOTMxLWQ4yjctMTFmMC1hNThiLTUyZTY1ODM4NDNhOSJ9fQ.QU0RXa0e-yB-fwJNjYt_OnyM6RteY3L1BaUWqCrdAB4; SERVERID=236fe4f21bf23223c449a2ac2dc20aa4|1765632725|1765632691; SERVERCORSID=236fe4f21bf23223c449a2ac2dc20aa4|1765632725|1765632691",
+        "cookie": "apipost-token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwYXlsb2FkIjp7InVzZXJfaWQiOjM5NDY2NDM3MTIyMzAwMzEzNywidGltZSI6MTc2NTYzMjU2NSwidXVpZCI6ImJlNDJjOTMxLWQ4MjctMTFmMC1hNThiLTUyZTY1ODM4NDNhOSJ9fQ.QU0RXa0e-yB-fwJNjYt_OnyM6RteY3L1BaUWqCrdAB4; SERVERID=236fe4f21bf23223c449a2ac2dc20aa4|1765632725|1765632691; SERVERCORSID=236fe4f21bf23223c449a2ac2dc20aa4|1765632725|1765632691",
         "Referer": "https://workspace.apipost.net/57a21612a051000/apis",
         "Referrer-Policy": "strict-origin-when-cross-origin"
     }
@@ -360,16 +317,26 @@ def get_content(pid):
                     },
                     "pre_tasks": [], "post_tasks": [],
                     "header": {"parameter": [
-                        {"description": "", "field_type": "string", "is_checked": 1, "key": " AppVersion", "value": "2600034600", "not_None": 1, "schema": {"type": "string"}, "param_id": "3c60653273e0b3"},
-                        {"description": "", "field_type": "string", "is_checked": 1, "key": "TerminalId", "value": "android", "not_None": 1, "schema": {"type": "string"}, "param_id": "3c6075c1f3e0e1"},
-                        {"description": "", "field_type": "string", "is_checked": 1, "key": "X-UP-CLIENT-CHANNEL-ID", "value": "2600034600-99000-201600010010028", "not_None": 1, "schema": {"type": "string"}, "param_id": "3c60858bb3e10c"}
+                        {"description": "", "field_type": "string", "is_checked": 1, "key": " AppVersion",
+                         "value": "2600034600", "not_None": 1, "schema": {"type": "string"},
+                         "param_id": "3c60653273e0b3"},
+                        {"description": "", "field_type": "string", "is_checked": 1, "key": "TerminalId",
+                         "value": "android", "not_None": 1, "schema": {"type": "string"}, "param_id": "3c6075c1f3e0e1"},
+                        {"description": "", "field_type": "string", "is_checked": 1, "key": "X-UP-CLIENT-CHANNEL-ID",
+                         "value": "2600034600-99000-201600010010028", "not_None": 1, "schema": {"type": "string"},
+                         "param_id": "3c60858bb3e10c"}
                     ]},
                     "query": {"parameter": [
-                        {"param_id": "3c5fd74233e004", "field_type": "string", "is_checked": 1, "key": "sign", "not_None": 1, "value": params[0].split("=")[1], "description": ""},
-                        {"param_id": "3c6022f433e030", "field_type": "string", "is_checked": 1, "key": "rateType", "not_None": 1, "value": params[1].split("=")[1], "description": ""},
-                        {"param_id": "3c60354133e05b", "field_type": "string", "is_checked": 1, "key": "contId", "not_None": 1, "value": params[2].split("=")[1], "description": ""},
-                        {"param_id": "3c605e4bf860b1", "field_type": "String", "is_checked": 1, "key": "timestamp", "not_None": 1, "value": params[3].split("=")[1], "description": ""},
-                        {"param_id": "3c605e4c3860b2", "field_type": "String", "is_checked": 1, "key": "salt", "not_None": 1, "value": params[4].split("=")[1], "description": ""}
+                        {"param_id": "3c5fd74233e004", "field_type": "string", "is_checked": 1, "key": "sign",
+                         "not_None": 1, "value": params[0].split("=")[1], "description": ""},
+                        {"param_id": "3c6022f433e030", "field_type": "string", "is_checked": 1, "key": "rateType",
+                         "not_None": 1, "value": params[1].split("=")[1], "description": ""},
+                        {"param_id": "3c60354133e05b", "field_type": "string", "is_checked": 1, "key": "contId",
+                         "not_None": 1, "value": params[2].split("=")[1], "description": ""},
+                        {"param_id": "3c605e4bf860b1", "field_type": "String", "is_checked": 1, "key": "timestamp",
+                         "not_None": 1, "value": params[3].split("=")[1], "description": ""},
+                        {"param_id": "3c605e4c3860b2", "field_type": "String", "is_checked": 1, "key": "salt",
+                         "not_None": 1, "value": params[4].split("=")[1], "description": ""}
                     ], "query_add_equal": 1},
                     "cookie": {"parameter": [], "cookie_encode": 1},
                     "restful": {"parameter": []},
@@ -381,7 +348,8 @@ def get_content(pid):
         },
         "test_events": [{
             "type": "api",
-            "data": {"target_id": "3c5fd6a9786002", "project_id": "57a21612a051000", "parent_id": "0", "target_type": "api"}
+            "data": {"target_id": "3c5fd6a9786002", "project_id": "57a21612a051000", "parent_id": "0",
+                     "target_type": "api"}
         }]
     }
     body = json.dumps(body, separators=(",", ":"))
@@ -414,7 +382,7 @@ def append_All_Live(live, flag, data):
         if data["pID"] in processed_pids:
             return
         processed_pids.add(data["pID"])
-        
+
         respData = get_content(data["pID"])
         playurl = getddCalcu720p(respData["body"]["urlInfo"]["url"], data["pID"])
 
@@ -433,33 +401,30 @@ def append_All_Live(live, flag, data):
                 z += 1
 
         if z != 7:
-            # 处理频道名
-            ch_name = data["name"].replace("CCTV", "CCTV-") if "CCTV" in data["name"] else data["name"]
-            
+            # 处理频道名（修改：新增熊猫频道移除「高清」后缀，保留CCTV格式处理）
+            ch_name = data["name"]
+            if "CCTV" in ch_name:
+                ch_name = ch_name.replace("CCTV", "CCTV-")  # CCTV统一格式
+            if "熊猫" in ch_name:
+                ch_name = ch_name.replace("高清", "")  # 移除熊猫频道的高清后缀
+
             # 智能分类（使用5分类方案）
             category = smart_classify_5_categories(ch_name)
             if category is None:
                 return  # 频道已存在，跳过
-                
-            # 获取排序键
+
+            # 获取排序键（使用修改后的排序规则）
             sort_key = get_sort_key(ch_name)
-            
-            # 核心修改：1. 适配iptv-org的tvg-name（保证EPG匹配）
-            tvg_name = get_iptv_org_tvg_name(ch_name)
-            # 核心修改：2. 使用iptv-org仓库的logo（可选，也可保留原logo逻辑）
-            epg_logo_base = "https://raw.githubusercontent.com/iptv-org/iptv/refs/heads/master/logos/"
-            standard_logo_name = tvg_name.replace("CCTV-", "cctv-").replace("+", "plus").lower()
-            tvg_logo = f"{epg_logo_base}{standard_logo_name}.png"
-            
-            # 构造m3u条目（适配iptv-org EPG）
-            m3u_item = f'#EXTINF:-1 tvg-name="{tvg_name}" tvg-logo="{tvg_logo}" group-title="{category}",{ch_name}\n{playurl}\n'
-            
+
+            # 关键修改2：移除tvg-name、tvg-logo，保留group-title分类
+            m3u_item = f'#EXTINF:-1 group-title="{category}",{ch_name}\n{playurl}\n'
+
             # 构造txt条目
             txt_item = f"{ch_name},{playurl}\n"
-            
+
             # 存储到字典
             channels_dict[ch_name] = [m3u_item, txt_item, category, sort_key]
-            print(f'频道 [{ch_name}]【{category}】更新成功！(tvg-name: {tvg_name}, EPG源: iptv-org)')
+            print(f'频道 [{ch_name}]【{category}】更新成功！')
         else:
             print(f'频道 [{data["name"]}] 更新失败！')
     except Exception as e:
@@ -479,29 +444,26 @@ def update(live, url):
 
 
 def main():
-    # 可选：预下载iptv-org的EPG到本地（提升稳定性）
-    download_iptv_org_epg_cache()
-    
     # 1. 初始化文件
     writefile(m3u_path, M3U_HEADER, 'w')
     writefile(txt_path, "", 'w')
-    
+
     # 2. 遍历爬取
     for live in lives:
         print(f"\n分类 ----- [{live}] ----- 开始更新. . .")
         url = f'https://program-sc.miguvideo.com/live/v2/tv-data/{LIVE[live]}'
         update(live, url)
-    
+
     # 3. 按分类组织频道数据
     category_channels = defaultdict(list)
-    
+
     for ch_name, (m3u_item, txt_item, category, sort_key) in channels_dict.items():
         category_channels[category].append((sort_key, ch_name, m3u_item, txt_item))
-    
+
     # 4. 对每个分类下的频道进行排序（从小到大）
     for category in category_channels:
         category_channels[category].sort(key=lambda x: x[0])
-    
+
     # 5. 按分类顺序写入m3u文件
     category_order = [
         '📺央视频道',
@@ -510,12 +472,12 @@ def main():
         '🎬影音娱乐',
         '📰生活资讯'
     ]
-    
+
     for category in category_order:
         if category in category_channels:
             for sort_key, ch_name, m3u_item, txt_item in category_channels[category]:
                 writefile(m3u_path, m3u_item, 'a')
-    
+
     # 6. 按分类写入txt文件
     for category in category_order:
         if category in category_channels and category_channels[category]:
@@ -524,10 +486,10 @@ def main():
             # 写该分类下的频道
             for sort_key, ch_name, m3u_item, txt_item in category_channels[category]:
                 writefile(txt_path, txt_item, 'a')
-    
+
     # 7. 输出统计信息
     total_channels = len(channels_dict)
-    
+
     # 统计各分类数量
     category_stats = {}
     for category in category_order:
@@ -535,12 +497,12 @@ def main():
             category_stats[category] = len(category_channels[category])
         else:
             category_stats[category] = 0
-    
+
     print(f"\n✅ 双格式文件生成完成！")
-    print(f"📁 M3U格式：{m3u_path} (EPG源: {IPTV_ORG_EPG_GZ_URL})")
+    print(f"📁 M3U格式：{m3u_path}")
     print(f"📁 TXT格式：{txt_path}")
     print(f"📊 总计频道数：{total_channels}")
-    
+
     # 打印分类统计
     print("\n📋 5分类统计：")
     for category in category_order:
