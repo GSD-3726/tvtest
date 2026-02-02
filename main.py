@@ -361,10 +361,13 @@ def append_All_Live(live, flag, data):
             # 获取排序键
             sort_key = get_sort_key(ch_name)
             
-            # 简化tvg-logo
-            tvg_logo = f"{ch_name.replace('CCTV-', 'CCTV').replace(' ', '')}.png"
+            # 【核心修改】配置GitHub远程EPG logo URL（稳定仓库，覆盖所有频道）
+            epg_logo_base = "https://raw.githubusercontent.com/GSD-3726/IPTV/refs/heads/master/output/logo/"
+            # 标准化频道名（适配仓库命名：去横杠/空格/特殊符号，避免404）
+            standard_name = ch_name.replace('CCTV-', 'CCTV').replace(' ', '').replace('·', '').replace('—', '').replace('–', '')
+            tvg_logo = f"{epg_logo_base}{standard_name}.png"
             
-            # 构造m3u条目
+            # 构造m3u条目（已包含有效远程EPG图片）
             m3u_item = f'#EXTINF:-1 tvg-name="{ch_name}" tvg-logo="{tvg_logo}" group-title="{category}",{ch_name}\n{playurl}\n'
             
             # 构造txt条目
@@ -372,7 +375,7 @@ def append_All_Live(live, flag, data):
             
             # 存储到字典
             channels_dict[ch_name] = [m3u_item, txt_item, category, sort_key]
-            print(f'频道 [{ch_name}]【{category}】更新成功！')
+            print(f'频道 [{ch_name}]【{category}】更新成功！(已配置EPG图片)')
         else:
             print(f'频道 [{data["name"]}] 更新失败！')
     except Exception as e:
