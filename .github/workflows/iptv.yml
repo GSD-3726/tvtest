@@ -3,55 +3,68 @@ name: 频道自动更新+排序
 # 触发方式：1. 每2小时定时运行 2. 手动触发 3. 代码推送/PR时触发（便于测试）
 on:
   schedule:
-    # cron表达式：每2小时运行一次（UTC时间，与北京时间差8小时，无需调整，cron按服务器时间执行）
-    - cron: '0 */2 * * *'
-  workflow_dispatch:  # 手动触发按钮（GitHub仓库Actions页面可见）
+    - cron: '0 */2 * * *'  # UTC每2小时运行，对应北京时间+8小时
+  workflow_dispatch:       # 手动触发按钮（仓库Actions页面可见）
   push:
-    branches: [ main, master ]  # 代码推送到主分支时触发测试
+    branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
 
-# 工作流任务
+# 工作流核心任务
 jobs:
   update-channel:
-    # 运行环境：选择Ubuntu最新版（轻量、快速）
     runs-on: ubuntu-latest
-    # 任务步骤
     steps:
-      # 步骤1：检出仓库代码（将你的代码拉取到运行环境）
+      # 步骤1：检出仓库根目录所有代码（运行环境默认进入仓库根目录）
       - name: 检出代码
         uses: actions/checkout@v4
 
-      # 步骤2：配置Python环境（匹配你的脚本Python版本，如3.9/3.10/3.11）
+      # 步骤2：配置Python环境（匹配脚本版本，缓存依赖加速）
       - name: 配置Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'  # 建议与本地运行的Python版本一致
-          cache: 'pip'  # 缓存pip依赖，加速下次运行
+          python-version: '3.10'
+          cache: 'pip'
 
-      # 步骤3：安装脚本依赖（含排序所需的pypinyin/natsort，及爬取所需的requests等）
+      # 步骤3：安装脚本依赖
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install pypinyin natsort requests  # 按需添加你的其他依赖（如lxml/BeautifulSoup4）
+          pip install pypinyin natsort requests
 
-      # 步骤4：运行频道更新脚本（核心步骤，执行main.py）
+      # 步骤4：运行更新脚本（核心：在仓库根目录执行，生成/更新的文件直接存根目录）
       - name: 运行更新脚本
         run: |
           python main.py
 
-      # 步骤5：推送更新后的M3U文件/错误日志推回GitHub仓库（已修复推送失败问题）
-      - name: 推送更新后的文件
+      # 步骤5：推送更新→根目录替换原文件（核心修复：保障根目录覆盖、自动解决冲突）
+      - name: 推送更新到根目录并替换原文件
         run: |
+          # 配置Git提交身份（GitHub Actions机器人）
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add .  # 添加所有修改的文件（M3U/日志）
-          git commit -m "Auto update channel list $(date +'%Y-%m-%d %H:%M:%S')" || echo "无文件需要更新"
-          # 关联本地main分支与远程origin/main分支（临时环境无默认追踪关系）
-          git branch --set-upstream-to=origin/main main
-          # 拉取远程最新代码并变基，保持提交历史线性，解决历史不一致问题
-          git pull --rebase origin main
-          # 执行推送
+          
+          # 关键：添加根目录所有修改的文件（脚本更新的m3u/txt等直接被追踪，用于替换）
+          git add .
+          
+          # 提交更新（无文件修改则跳过，避免报错）
+          git commit -m "Auto update channel list $(date +'%Y-%m-%d %H:%M:%S')" || echo "无文件需要更新，跳过提交"
+          
+          # 关联本地分支与远程根分支（临时环境必备，保障拉取/推送指向正确）
+          git branch --set-upstream-to=origin/main main 2>/dev/null || git checkout -b main
+          
+          # 拉取远程最新代码并变基，有冲突则自动解决（保留本地更新，强制覆盖远程原文件）
+          git pull --rebase origin main || (
+            echo "检测到文件冲突，自动用本地最新更新覆盖仓库根目录原文件"
+            # 核心：保留本地（脚本生成的根目录）文件，彻底替换远程冲突的根目录文件
+            git checkout --ours migu.m3u migu.txt
+            # 标记冲突文件已解决（告知Git完成替换）
+            git add migu.m3u migu.txt
+            # 继续执行中断的变基，确保提交历史同步
+            git rebase --continue
+          )
+          
+          # 最终推送：将本地根目录更新后的文件推送到仓库根目录，直接替换原文件
           git push
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # GitHub自动生成的令牌，无需手动配置
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # GitHub自动生成，无需手动配置
