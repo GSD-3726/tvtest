@@ -1,46 +1,69 @@
-name: IPTV链接处理
-
+# 工作流名称，可自定义
+name: 咪咕直播源自动爬取
+# 触发条件
 on:
+  # 定时触发：每2小时运行一次（UTC时间，cron表达式）
+  schedule:
+    - cron: '0 */2 * * *'  # 核心：每2小时的0分执行，UTC时间，修改规则见下文
+  # 手动触发：在GitHub仓库Actions页面可手动点击运行
+  workflow_dispatch:
+  # 可选：代码推送到main/master分支时触发（方便测试）
   push:
-    branches:
-      - master
-  workflow_dispatch:  # 手动触发
+    branches: [ main, master ]
+  # 可选：PR提交到main/master分支时触发（方便测试）
+  pull_request:
+    branches: [ main, master ]
 
-permissions:
-  contents: read
-  actions: write
-
+# 工作流任务
 jobs:
-  run-iptv-processor:
+  crawl-migu:
+    # 运行环境：选择Ubuntu最新版，轻量且稳定
     runs-on: ubuntu-latest
-
+    # 任务步骤
     steps:
-      - name: 检出代码
+      # 步骤1：拉取当前仓库代码到运行环境
+      - name: 拉取仓库代码
         uses: actions/checkout@v4
+        with:
+          # 拉取所有历史提交，确保推送时无冲突
+          fetch-depth: 0
 
-      - name: 设置 Python 3.13
+      # 步骤2：配置Python环境（适配你的脚本，3.8+即可）
+      - name: 配置Python环境
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: '3.9'  # 推荐3.9，兼容所有Python3.6+语法
+          cache: 'pip'  # 缓存pip依赖，加速后续运行
 
-      - name: 安装系统依赖（FFmpeg，内置 ffprobe）
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y ffmpeg
-          ffmpeg -version
-          ffprobe -version
-
-      - name: 安装 Python 依赖
+      # 步骤3：安装脚本依赖（仅需requests）
+      - name: 安装依赖包
         run: |
           python -m pip install --upgrade pip
-          pip install requests aiohttp m3u8 async-timeout
+          pip install requests  # 你的脚本唯一依赖
 
-      - name: 执行单文件脚本
-        run: python iptv_processor.py
+      # 步骤4：运行咪咕爬取脚本，生成migu.txt
+      - name: 执行爬取脚本
+        run: |
+          # 注意：此处替换为你的脚本实际文件名（如main.py/咪咕爬取.py）
+          python main.py
+        # 脚本运行失败时，终止整个工作流
+        continue-on-error: false
 
-      - name: 上传生成的文件（可下载）
-        uses: actions/upload-artifact@v4
-        with:
-          name: iptv-output-files
-          path: output/
-          retention-days: 7
+      # 步骤5：配置Git用户信息（用于提交推送migu.txt）
+      - name: 配置Git提交信息
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      # 步骤6：提交并推送最新的migu.txt到仓库
+      - name: 推送直播源文件到仓库
+        run: |
+          # 添加migu.txt到暂存区
+          git add migu.txt
+          # 提交（备注包含运行时间），无文件变化时不报错（|| true）
+          git commit -m "Auto update migu.txt: $(date +'%Y-%m-%d %H:%M:%S UTC')" || true
+          # 推送到当前分支（使用GitHub内置TOKEN授权）
+          git push origin ${{ github.ref }}
+        env:
+          # GitHub Actions内置TOKEN，拥有仓库推送权限，无需手动配置
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
