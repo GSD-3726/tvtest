@@ -34,7 +34,7 @@ jobs:
 
     - name: Run MIGU channel updater
       run: |
-        python migu.py  # 假设你的脚本名为migu.py
+        python main.py  # 假设你的脚本名为migu.py
 
     - name: Commit and push changes
       run: |
