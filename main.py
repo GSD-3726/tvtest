@@ -92,16 +92,27 @@ def extract_cctv_number(channel_name):
     return 9999  # 其他频道
 
 
+# ====================== 核心修改：重写extract_panda_number函数 ======================
 def extract_panda_number(channel_name):
-    """新增：提取熊猫频道数字作为排序键（匹配「熊猫X」格式）"""
-    match = re.search(r'熊猫(\d+)', channel_name)
-    if match:
+    """提取熊猫频道数字作为排序键，实现 01 → 1 → 2 → 3 → 4 → 5 → 6 → 10 排序"""
+    # 先匹配带前导零的格式（如 熊猫01、熊猫02）
+    zero_match = re.search(r'熊猫0(\d+)', channel_name)
+    if zero_match:
         try:
-            return int(match.group(1))  # 提取数字转整型，实现纯数字升序
+            num = int(zero_match.group(1))
+            return (0, num)  # 带前导零：第一维度0（优先级最高），第二维度数字
         except:
-            return 999  # 异常情况排最后
-    return 9999  # 非数字熊猫频道排最后
-
+            return (999, 999)  # 异常情况排最后
+    # 再匹配纯数字格式（如 熊猫1、熊猫2、熊猫10）
+    normal_match = re.search(r'熊猫(\d+)', channel_name)
+    if normal_match:
+        try:
+            num = int(normal_match.group(1))
+            return (1, num)  # 纯数字：第一维度1（优先级次之），第二维度数字
+        except:
+            return (999, 999)  # 异常情况排最后
+    return (9999, 9999)  # 非数字熊猫频道排最后
+# ==================================================================================
 
 def extract_satellite_first_char(channel_name):
     """新增：提取卫视频道名称第一个字符（归一化），用于首字母升序排序"""
@@ -120,10 +131,10 @@ def get_sort_key(channel_name):
         cctv_num = extract_cctv_number(channel_name)
         return (0, cctv_num, channel_name)  # 0：最高优先级
     
-    # 2. 熊猫频道（新增：按提取的数字升序）
+    # 2. 熊猫频道（无需修改，自动适配新的元组排序键）
     if '熊猫' in channel_name:
         panda_num = extract_panda_number(channel_name)
-        return (1, panda_num, channel_name)  # 1：次高优先级
+        return (1, panda_num, channel_name)  # 1：次高优先级，panda_num是元组，自动按维度比较
     
     # 3. 卫视频道（新增：按首字母升序，首字母相同按名称）
     if is_satellite_channel(channel_name):
