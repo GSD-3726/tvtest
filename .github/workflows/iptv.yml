@@ -3,68 +3,104 @@ name: 频道自动更新+排序
 # 触发方式：1. 每2小时定时运行 2. 手动触发 3. 代码推送/PR时触发（便于测试）
 on:
   schedule:
-    - cron: '0 */2 * * *'  # UTC每2小时运行，对应北京时间+8小时
+    - cron: '0 */2 * * *'  # UTC每2小时运行，对应北京时间+8小时（10:00、12:00...）
   workflow_dispatch:       # 手动触发按钮（仓库Actions页面可见）
   push:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
 
-# 工作流核心任务
+# 工作流全局配置：超时时间、失败继续
+defaults:
+  run:
+    shell: bash
+    timeout-minutes: 15  # 单个步骤超时时间
 jobs:
   update-channel:
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # 整个任务超时时间
     steps:
-      # 步骤1：检出仓库根目录所有代码（运行环境默认进入仓库根目录）
+      # 步骤1：检出仓库代码（包含所有分支，兼容main/master）
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 拉取所有历史提交和分支，解决分支关联问题
 
-      # 步骤2：配置Python环境（匹配脚本版本，缓存依赖加速）
+      # 步骤2：缓存Python依赖，加速构建（比setup-python的cache更稳定）
+      - name: 缓存Python依赖
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/pip
+            **/__pycache__
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # 步骤3：配置Python环境（3.10，匹配脚本版本）
       - name: 配置Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: 'pip'
 
-      # 步骤3：安装脚本依赖
+      # 步骤4：安装脚本依赖（移除冗余的pypinyin natsort）
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install pypinyin natsort requests
+          pip install requests  # 仅保留实际使用的依赖
 
-      # 步骤4：运行更新脚本（核心：在仓库根目录执行，生成/更新的文件直接存根目录）
+      # 步骤5：运行更新脚本（核心：爬取频道、生成文件）
       - name: 运行更新脚本
-        run: |
-          python main.py
+        run: python main.py
+        env:
+          PYTHONUNBUFFERED: 1  # 实时输出Python日志，便于调试
 
-      # 步骤5：推送更新→根目录替换原文件（核心修复：保障根目录覆盖、自动解决冲突）
-      - name: 推送更新到根目录并替换原文件
+      # 步骤6：推送更新到仓库（修复分支兼容、完整冲突处理、兜底推送）
+      - name: 推送更新到仓库
+        if: github.event_name != 'pull_request'  # PR触发时不推送，避免冲突
         run: |
           # 配置Git提交身份（GitHub Actions机器人）
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # 关键：添加根目录所有修改的文件（脚本更新的m3u/txt等直接被追踪，用于替换）
+          # 检测仓库默认分支（兼容main/master）
+          DEFAULT_BRANCH=$(git remote show origin | grep 'HEAD branch' | cut -d' ' -f5)
+          echo "仓库默认分支：$DEFAULT_BRANCH"
+          
+          # 切换到默认分支并拉取最新代码
+          git checkout $DEFAULT_BRANCH
+          git pull origin $DEFAULT_BRANCH --rebase
+          
+          # 添加所有修改的文件（兼容脚本生成的所有文件）
           git add .
           
           # 提交更新（无文件修改则跳过，避免报错）
           git commit -m "Auto update channel list $(date +'%Y-%m-%d %H:%M:%S')" || echo "无文件需要更新，跳过提交"
           
-          # 关联本地分支与远程根分支（临时环境必备，保障拉取/推送指向正确）
-          git branch --set-upstream-to=origin/main main 2>/dev/null || git checkout -b main
-          
-          # 拉取远程最新代码并变基，有冲突则自动解决（保留本地更新，强制覆盖远程原文件）
-          git pull --rebase origin main || (
-            echo "检测到文件冲突，自动用本地最新更新覆盖仓库根目录原文件"
-            # 核心：保留本地（脚本生成的根目录）文件，彻底替换远程冲突的根目录文件
-            git checkout --ours migu.m3u migu.txt
-            # 标记冲突文件已解决（告知Git完成替换）
-            git add migu.m3u migu.txt
-            # 继续执行中断的变基，确保提交历史同步
-            git rebase --continue
-          )
-          
-          # 最终推送：将本地根目录更新后的文件推送到仓库根目录，直接替换原文件
-          git push
+          # 推送更新（带强制兜底，解决轻量冲突）
+          git push origin $DEFAULT_BRANCH || git push origin $DEFAULT_BRANCH --force-with-lease
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # GitHub自动生成，无需手动配置
+
+      # 步骤7：工作流失败通知（创建GitHub Issue，便于查看错误）
+      - name: 失败创建Issue通知
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `频道更新工作流失败 | ${new Date().toLocaleString('zh-CN')}`,
+              body: `
+### 工作流失败信息
+- 工作流名称：${context.workflow}
+- 运行ID：[${context.runId}](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+- 触发方式：${context.eventName}
+- 分支：${context.ref.replace('refs/heads/', '')}
+
+请前往Actions页面查看详细错误日志并排查问题！
+              `,
+              labels: ['工作流失败', '自动通知']
+            })
