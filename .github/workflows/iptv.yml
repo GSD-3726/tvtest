@@ -2,10 +2,10 @@ name: Update MIGU Live Channels
 
 on:
   schedule:
-    # 每2小时运行一次（UTC时间）
+    # 每2小时运行一次（UTC时间，对应北京时间+8小时，即北京时间8/10/12...点执行）
     - cron: '0 */2 * * *'
   workflow_dispatch:  # 支持手动触发
-  push:  # 代码变更时也运行
+  push:  # 代码变更时运行
     paths:
       - '**.py'
     branches: [ main, master ]
@@ -18,37 +18,42 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        # 保留上次生成的文件
-        fetch-depth: 0
+        fetch-depth: 0  # 拉取完整提交历史，支持合并/变基（必须配置）
 
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
-        cache: 'pip'
+        cache: 'pip'  # 缓存依赖，提升运行速度
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install requests
 
-    - name: Run MIGU channel updater
+    - name: 配置系统时区为北京时间（核心：提交时间/日志时间均为北京时间）
+      run: sudo timedatectl set-timezone Asia/Shanghai
+
+    - name: Run MIGU channel updater（脚本名改为main.py，严格按要求）
       run: |
-        python main.py  # 假设你的脚本名为migu.py
+        python main.py
 
     - name: Commit and push changes
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         
-        # 检查是否有文件变更
+        # 仅检查目标输出文件变更，避免无关修改触发提交
         if git diff --quiet HEAD -- migu.m3u migu.txt; then
-          echo "No changes detected in output files"
+          echo "✅ No changes detected in migu.m3u/migu.txt, skip commit"
         else
           git add migu.m3u migu.txt
-          git commit -m "🤖 Auto-update: MIGU直播源 $(date +'%Y-%m-%d %H:%M')"
-          git push
+          # 提交信息带北京时间（时分秒），更精准
+          git commit -m "🤖 Auto-update: MIGU直播源 $(date +'%Y-%m-%d %H:%M:%S')"
+          # 核心解决推送被拒：拉取远程最新变更+自动合并，再推送
+          git pull origin main --rebase --autostash
+          git push origin main
+          echo "✅ Push MIGU live channel updates successfully（北京时间）"
         fi
       env:
-        # 如果有需要，添加你的GitHub Token
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # 自动生成，无需手动配置
