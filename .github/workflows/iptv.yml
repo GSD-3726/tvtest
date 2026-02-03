@@ -1,106 +1,54 @@
-# 工作流名称
-name: 频道自动更新+排序
-# 触发方式：1. 每2小时定时运行 2. 手动触发 3. 代码推送/PR时触发（便于测试）
+name: Update MIGU Live Channels
+
 on:
   schedule:
-    - cron: '0 */2 * * *'  # UTC每2小时运行，对应北京时间+8小时（10:00、12:00...）
-  workflow_dispatch:       # 手动触发按钮（仓库Actions页面可见）
-  push:
-    branches: [ main, master ]
-  pull_request:
+    # 每2小时运行一次（UTC时间）
+    - cron: '0 */2 * * *'
+  workflow_dispatch:  # 支持手动触发
+  push:  # 代码变更时也运行
+    paths:
+      - '**.py'
     branches: [ main, master ]
 
-# 工作流全局配置：超时时间、失败继续
-defaults:
-  run:
-    shell: bash
-    timeout-minutes: 15  # 单个步骤超时时间
 jobs:
-  update-channel:
+  update-channels:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # 整个任务超时时间
+    
     steps:
-      # 步骤1：检出仓库代码（包含所有分支，兼容main/master）
-      - name: 检出代码
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # 拉取所有历史提交和分支，解决分支关联问题
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        # 保留上次生成的文件
+        fetch-depth: 0
 
-      # 步骤2：缓存Python依赖，加速构建（比setup-python的cache更稳定）
-      - name: 缓存Python依赖
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cache/pip
-            **/__pycache__
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        cache: 'pip'
 
-      # 步骤3：配置Python环境（3.10，匹配脚本版本）
-      - name: 配置Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-          cache: 'pip'
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests
 
-      # 步骤4：安装脚本依赖（移除冗余的pypinyin natsort）
-      - name: 安装依赖
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests  # 仅保留实际使用的依赖
+    - name: Run MIGU channel updater
+      run: |
+        python migu.py  # 假设你的脚本名为migu.py
 
-      # 步骤5：运行更新脚本（核心：爬取频道、生成文件）
-      - name: 运行更新脚本
-        run: python main.py
-        env:
-          PYTHONUNBUFFERED: 1  # 实时输出Python日志，便于调试
-
-      # 步骤6：推送更新到仓库（修复分支兼容、完整冲突处理、兜底推送）
-      - name: 推送更新到仓库
-        if: github.event_name != 'pull_request'  # PR触发时不推送，避免冲突
-        run: |
-          # 配置Git提交身份（GitHub Actions机器人）
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # 检测仓库默认分支（兼容main/master）
-          DEFAULT_BRANCH=$(git remote show origin | grep 'HEAD branch' | cut -d' ' -f5)
-          echo "仓库默认分支：$DEFAULT_BRANCH"
-          
-          # 切换到默认分支并拉取最新代码
-          git checkout $DEFAULT_BRANCH
-          git pull origin $DEFAULT_BRANCH --rebase
-          
-          # 添加所有修改的文件（兼容脚本生成的所有文件）
-          git add .
-          
-          # 提交更新（无文件修改则跳过，避免报错）
-          git commit -m "Auto update channel list $(date +'%Y-%m-%d %H:%M:%S')" || echo "无文件需要更新，跳过提交"
-          
-          # 推送更新（带强制兜底，解决轻量冲突）
-          git push origin $DEFAULT_BRANCH || git push origin $DEFAULT_BRANCH --force-with-lease
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # GitHub自动生成，无需手动配置
-
-      # 步骤7：工作流失败通知（创建GitHub Issue，便于查看错误）
-      - name: 失败创建Issue通知
-        if: failure()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `频道更新工作流失败 | ${new Date().toLocaleString('zh-CN')}`,
-              body: `
-### 工作流失败信息
-- 工作流名称：${context.workflow}
-- 运行ID：[${context.runId}](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
-- 触发方式：${context.eventName}
-- 分支：${context.ref.replace('refs/heads/', '')}
-
-请前往Actions页面查看详细错误日志并排查问题！
-              `,
-              labels: ['工作流失败', '自动通知']
-            })
+    - name: Commit and push changes
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        
+        # 检查是否有文件变更
+        if git diff --quiet HEAD -- migu.m3u migu.txt; then
+          echo "No changes detected in output files"
+        else
+          git add migu.m3u migu.txt
+          git commit -m "🤖 Auto-update: MIGU直播源 $(date +'%Y-%m-%d %H:%M')"
+          git push
+        fi
+      env:
+        # 如果有需要，添加你的GitHub Token
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
