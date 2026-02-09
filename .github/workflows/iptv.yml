@@ -39,29 +39,30 @@ jobs:
         python main.py
 
     - name: Commit and push changes
-  run: |
-    git config --local user.email "action@github.com"
-    git config --local user.name "GitHub Action"
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
 
-    # 判断文件是否变化
-    if git diff --quiet HEAD -- migu.m3u migu.txt; then
-      echo "✅ No changes detected, skip commit"
-      exit 0
-    fi
+        # 判断文件是否变化
+        if git diff --quiet HEAD -- migu.m3u migu.txt; then
+          echo "✅ No changes detected, skip commit"
+          exit 0
+        fi
 
-    git add migu.m3u migu.txt
-    git commit -m "🤖 Auto-update: MIGU直播源 $(date +'%Y-%m-%d %H:%M:%S')"
+        git add migu.m3u migu.txt
+        git commit -m "🤖 Auto-update: MIGU直播源 $(date +'%Y-%m-%d %H:%M:%S')"
 
-    # 推送到 GitHub
-    git pull origin main --rebase --autostash
-    git push origin main
+        # 推送到 GitHub（适配main/master分支，增强通用性）
+        git pull origin ${{ github.ref_name }} --rebase --autostash
+        git push origin ${{ github.ref_name }}
 
-    echo "✅ GitHub push success"
+        echo "✅ GitHub push success"
 
-    # ---------- 推送到 Gitee ----------
-    git remote remove gitee || true
-    git remote add gitee https://oauth2:${{ secrets.GITEE_TOKEN }}@gitee.com/bmg369/test.git
+        # ---------- 推送到 Gitee ----------
+        git remote remove gitee || true  # 移除已有gitee远程（避免重复添加报错）
+        git remote add gitee https://oauth2:${{ secrets.GITEE_TOKEN }}@gitee.com/bmg369/test.git
 
-    git push gitee main --force
+        # 强制推送到Gitee对应分支，适配main/master
+        git push gitee ${{ github.ref_name }} --force
 
-    echo "✅ Gitee sync success"
+        echo "✅ Gitee sync success"
