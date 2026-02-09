@@ -1,32 +1,70 @@
-name: Sync to Gitee
+name: Sync migu files to Gitee (Stable)
 
 on:
   push:
+    branches:
+      - main
     paths:
-      - 'migu.m3u'
-      - 'migu.txt'
+      - "migu.m3u"
+      - "migu.txt"
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    
+
     steps:
-      - name: Checkout GitHub repo
+      # 1. 拉取 GitHub 仓库
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
-      - name: Configure Git
+
+      # 2. Git 配置
+      - name: Configure git
         run: |
-          git config --global user.name "GitHub Actions"
+          git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
-      
+
+      # 3. 添加 Gitee 仓库
       - name: Add Gitee remote
         run: |
+          git remote remove gitee || true
           git remote add gitee https://oauth2:${{ secrets.GITEE_TOKEN }}@gitee.com/bmg369/test.git
-      
-      - name: Push to Gitee
+
+      # 4. 拉取 Gitee 分支（若存在）
+      - name: Fetch Gitee
         run: |
-          # 推送指定的两个文件到 Gitee
-          git push gitee HEAD:master --force --porcelain migu.m3u migu.txt 2>&1 | \
-            grep -v '^remote:'
+          git fetch gitee main || echo "Gitee branch not exists yet"
+
+      # 5. 创建临时同步分支
+      - name: Prepare sync branch
+        run: |
+          git checkout -B sync-temp
+
+      # 6. 只提交需要同步的文件
+      - name: Commit changed files only
+        run: |
+          git add migu.m3u migu.txt
+
+          if git diff --cached --quiet; then
+            echo "No file changes detected"
+            echo "skip_push=true" >> $GITHUB_ENV
+          else
+            git commit -m "Auto sync migu files"
+            echo "skip_push=false" >> $GITHUB_ENV
+          fi
+
+      # 7. 推送到 Gitee
+      - name: Push to Gitee
+        if: env.skip_push == 'false'
+        run: |
+          git push gitee sync-temp:main --force
+
+      # 8. 输出结果
+      - name: Finish
+        run: |
+          if [ "${{ env.skip_push }}" = "true" ]; then
+            echo "No update needed."
+          else
+            echo "Sync completed."
+          fi
