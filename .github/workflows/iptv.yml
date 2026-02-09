@@ -42,27 +42,18 @@ jobs:
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-
-        # 判断文件是否变化
+        
+        # 仅检查目标输出文件变更，避免无关修改触发提交
         if git diff --quiet HEAD -- migu.m3u migu.txt; then
-          echo "✅ No changes detected, skip commit"
-          exit 0
+          echo "✅ No changes detected in migu.m3u/migu.txt, skip commit"
+        else
+          git add migu.m3u migu.txt
+          # 提交信息带北京时间（时分秒），更精准
+          git commit -m "🤖 Auto-update: MIGU直播源 $(date +'%Y-%m-%d %H:%M:%S')"
+          # 核心解决推送被拒：拉取远程最新变更+自动合并，再推送
+          git pull origin main --rebase --autostash
+          git push origin main
+          echo "✅ Push MIGU live channel updates successfully（北京时间）"
         fi
-
-        git add migu.m3u migu.txt
-        git commit -m "🤖 Auto-update: MIGU直播源 $(date +'%Y-%m-%d %H:%M:%S')"
-
-        # 推送到 GitHub（适配main/master分支，增强通用性）
-        git pull origin ${{ github.ref_name }} --rebase --autostash
-        git push origin ${{ github.ref_name }}
-
-        echo "✅ GitHub push success"
-
-        # ---------- 推送到 Gitee ----------
-        git remote remove gitee || true  # 移除已有gitee远程（避免重复添加报错）
-        git remote add gitee https://oauth2:${{ secrets.GITEE_TOKEN }}@gitee.com/bmg369/test.git
-
-        # 强制推送到Gitee对应分支，适配main/master
-        git push gitee ${{ github.ref_name }} --force
-
-        echo "✅ Gitee sync success"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  
