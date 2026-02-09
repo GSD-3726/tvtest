@@ -1,51 +1,49 @@
 name: Sync migu files to Gitee
-# 仅监听指定文件变更，或手动触发
+# 仅监听指定文件变更/手动触发
 on:
   push:
     branches: [main, master]
     paths:
       - 'migu.m3u'
       - 'migu.txt'
-  workflow_dispatch:  # 手动触发，方便测试
+  workflow_dispatch:
 
 jobs:
   sync-migu-files:
     runs-on: ubuntu-latest
     steps:
-      # 步骤1：拉取GitHub仓库完整代码
+      # 步骤1：拉取GitHub仓库代码
       - name: Checkout GitHub Repository
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-          fetch-depth: 0  # 拉取完整提交历史
+          fetch-depth: 0
 
-      # 步骤2：仅提交migu.m3u和migu.txt到GitHub
+      # 步骤2：仅提交指定文件到GitHub
       - name: Commit migu files (if changed)
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          # 仅添加指定的两个文件
           git add migu.m3u migu.txt
-          # 无变更则跳过提交，避免流程失败
-          git commit -m "Update migu.m3u/migu.txt" || echo "No changes to migu files"
-          # 推回GitHub仓库
+          git commit -m "Update migu files" || echo "No changes to migu files"
           git push "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/GSD-3726/tvtest.git" HEAD:${{ github.ref }}
 
-      # 步骤3：同步到Gitee（核心修正：换用Yikun/hub-mirror-action）
+      # 步骤3：同步到Gitee（修正所有错误参数+HTTPS认证）
       - name: Sync to Gitee (bmg369/test)
         uses: Yikun/hub-mirror-action@master
         with:
-          # 源仓库：GitHub用户名/仓库（格式固定）
+          # 基础配置：源/目标平台+用户名
           src: github/GSD-3726
-          # 目标仓库：Gitee用户名
           dst: gitee/bmg369
-          # 指定要同步的仓库名（多个用逗号分隔）
+          # 指定同步的仓库名
           static_list: "tvtest"
-          # Gitee令牌（已在GitHub Secrets配置的GITEE_TOKEN）
-          token: ${{ secrets.GITEE_TOKEN }}
-          # 强制同步（覆盖Gitee仓库最新内容）
-          force_sync: true
-          # 仅同步指定分支（可选，避免同步无关分支）
-          ref: "main,master"
-          # 开启调试（方便排查问题，可选）
+          # 核心修正1：正确的Gitee令牌参数名（替代错误的token）
+          dst_token: ${{ secrets.GITEE_TOKEN }}
+          # 核心修正2：强制使用HTTPS协议（避免SSH公钥认证）
+          clone_style: "https"
+          # 核心修正3：正确的强制同步参数名（替代错误的force_sync）
+          force_update: true
+          # 调试模式（可选，方便排查）
           debug: true
+          # 超时配置（避免同步超时）
+          timeout: "300s"
