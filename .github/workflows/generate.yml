@@ -1,49 +1,32 @@
-name: Sync migu files to Gitee (No Interactive)
+name: Sync to Gitee
+
 on:
   push:
-    branches: [main, master]
     paths:
       - 'migu.m3u'
       - 'migu.txt'
-  workflow_dispatch:
 
 jobs:
-  sync-migu-files:
+  sync:
     runs-on: ubuntu-latest
+    
     steps:
-      # 步骤1：拉取GitHub仓库完整代码
-      - name: Checkout GitHub Repository
+      - name: Checkout GitHub repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: false
-
-      # 步骤2：关键配置：禁用git交互式认证 + 配置凭据存储
-      - name: Configure Git to Skip Interactive Auth
-        run: |
-          # 禁用git的交互式密码提示，强制使用地址中的令牌
-          git config --global credential.helper store
-          git config --global core.askpass ""  # 清空密码请求程序，避免交互
-          # 提前将Gitee凭据写入git凭据文件（核心：让git自动读取，不触发交互）
-          echo "https://${{ secrets.GITEE_TOKEN }}:@gitee.com" > ~/.git-credentials
-
-      # 步骤3：配置git用户信息
-      - name: Configure Git User
+      
+      - name: Configure Git
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-
-      # 步骤4：仅提交指定文件到GitHub
-      - name: Commit & Push to GitHub
+      
+      - name: Add Gitee remote
         run: |
-          git add migu.m3u migu.txt
-          git commit -m "Update migu files" || echo "No changes to migu files"
-          git push "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/GSD-3726/tvtest.git" HEAD:${{ github.ref }} --no-verify
-
-      # 步骤5：同步到Gitee（彻底避开交互认证）
-      - name: Sync to Gitee (Non-Interactive)
+          git remote add gitee https://oauth2:${{ secrets.GITEE_TOKEN }}@gitee.com/bmg369/test.git
+      
+      - name: Push to Gitee
         run: |
-          # 添加Gitee远程仓库（简化地址，凭据已提前写入）
-          git remote add gitee https://gitee.com/bmg369/test.git
-          # 强制推送（指定分支，避免歧义）
-          git push -f gitee ${{ github.ref_name }}:${{ github.ref_name }} --no-verify
+          # 推送指定的两个文件到 Gitee
+          git push gitee HEAD:master --force --porcelain migu.m3u migu.txt 2>&1 | \
+            grep -v '^remote:'
