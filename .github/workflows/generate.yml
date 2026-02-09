@@ -1,47 +1,49 @@
-name: Sync migu files to Gitee (HTTPS)
-# 仅监听指定文件变更/手动触发
+name: Sync migu files to Gitee (No Interactive)
 on:
   push:
     branches: [main, master]
     paths:
       - 'migu.m3u'
       - 'migu.txt'
-  workflow_dispatch:  # 手动触发测试
+  workflow_dispatch:
 
 jobs:
   sync-migu-files:
     runs-on: ubuntu-latest
     steps:
-      # 步骤1：拉取GitHub仓库完整代码（含历史）
+      # 步骤1：拉取GitHub仓库完整代码
       - name: Checkout GitHub Repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 拉取完整提交历史，确保同步不丢失
-          persist-credentials: false  # 禁用默认SSH凭据
+          fetch-depth: 0
+          persist-credentials: false
 
-      # 步骤2：配置git用户信息（必填，否则提交会失败）
+      # 步骤2：关键配置：禁用git交互式认证 + 配置凭据存储
+      - name: Configure Git to Skip Interactive Auth
+        run: |
+          # 禁用git的交互式密码提示，强制使用地址中的令牌
+          git config --global credential.helper store
+          git config --global core.askpass ""  # 清空密码请求程序，避免交互
+          # 提前将Gitee凭据写入git凭据文件（核心：让git自动读取，不触发交互）
+          echo "https://${{ secrets.GITEE_TOKEN }}:@gitee.com" > ~/.git-credentials
+
+      # 步骤3：配置git用户信息
       - name: Configure Git User
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
 
-      # 步骤3：仅提交migu.m3u/migu.txt到GitHub（无变更则跳过）
+      # 步骤4：仅提交指定文件到GitHub
       - name: Commit & Push to GitHub
         run: |
-          # 仅添加指定的两个文件
           git add migu.m3u migu.txt
-          # 无变更则跳过提交，避免流程失败
-          git commit -m "Update migu.m3u/migu.txt via Actions" || echo "No changes to migu files"
-          # 推回GitHub仓库（HTTPS方式）
-          git push "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/GSD-3726/tvtest.git" HEAD:${{ github.ref }}
+          git commit -m "Update migu files" || echo "No changes to migu files"
+          git push "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/GSD-3726/tvtest.git" HEAD:${{ github.ref }} --no-verify
 
-      # 步骤4：同步到Gitee（核心：纯HTTPS命令，无SSH依赖）
-      - name: Sync to Gitee via HTTPS
+      # 步骤5：同步到Gitee（彻底避开交互认证）
+      - name: Sync to Gitee (Non-Interactive)
         run: |
-          # 添加Gitee为远程仓库（HTTPS地址+令牌认证）
-          git remote add gitee "https://${{ secrets.GITEE_TOKEN }}@gitee.com/bmg369/test.git"
-          # 拉取Gitee仓库最新内容（避免冲突，可选但建议加）
-          git fetch gitee
-          # 强制推送到Gitee（覆盖最新内容，确保同步成功）
-          git push -f gitee ${{ github.ref }}:refs/heads/main --no-verify
-          # 说明：若Gitee主分支是master，替换为 refs/heads/master
+          # 添加Gitee远程仓库（简化地址，凭据已提前写入）
+          git remote add gitee https://gitee.com/bmg369/test.git
+          # 强制推送（指定分支，避免歧义）
+          git push -f gitee ${{ github.ref_name }}:${{ github.ref_name }} --no-verify
