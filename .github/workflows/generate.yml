@@ -1,4 +1,4 @@
-name: Sync migu files to Gitee
+name: Sync migu files to Gitee (HTTPS)
 # 仅监听指定文件变更/手动触发
 on:
   push:
@@ -6,44 +6,42 @@ on:
     paths:
       - 'migu.m3u'
       - 'migu.txt'
-  workflow_dispatch:
+  workflow_dispatch:  # 手动触发测试
 
 jobs:
   sync-migu-files:
     runs-on: ubuntu-latest
     steps:
-      # 步骤1：拉取GitHub仓库代码
+      # 步骤1：拉取GitHub仓库完整代码（含历史）
       - name: Checkout GitHub Repository
         uses: actions/checkout@v4
         with:
-          persist-credentials: false
-          fetch-depth: 0
+          fetch-depth: 0  # 拉取完整提交历史，确保同步不丢失
+          persist-credentials: false  # 禁用默认SSH凭据
 
-      # 步骤2：仅提交指定文件到GitHub
-      - name: Commit migu files (if changed)
+      # 步骤2：配置git用户信息（必填，否则提交会失败）
+      - name: Configure Git User
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
+
+      # 步骤3：仅提交migu.m3u/migu.txt到GitHub（无变更则跳过）
+      - name: Commit & Push to GitHub
+        run: |
+          # 仅添加指定的两个文件
           git add migu.m3u migu.txt
-          git commit -m "Update migu files" || echo "No changes to migu files"
+          # 无变更则跳过提交，避免流程失败
+          git commit -m "Update migu.m3u/migu.txt via Actions" || echo "No changes to migu files"
+          # 推回GitHub仓库（HTTPS方式）
           git push "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/GSD-3726/tvtest.git" HEAD:${{ github.ref }}
 
-      # 步骤3：同步到Gitee（修正所有错误参数+HTTPS认证）
-      - name: Sync to Gitee (bmg369/test)
-        uses: Yikun/hub-mirror-action@master
-        with:
-          # 基础配置：源/目标平台+用户名
-          src: github/GSD-3726
-          dst: gitee/bmg369
-          # 指定同步的仓库名
-          static_list: "tvtest"
-          # 核心修正1：正确的Gitee令牌参数名（替代错误的token）
-          dst_token: ${{ secrets.GITEE_TOKEN }}
-          # 核心修正2：强制使用HTTPS协议（避免SSH公钥认证）
-          clone_style: "https"
-          # 核心修正3：正确的强制同步参数名（替代错误的force_sync）
-          force_update: true
-          # 调试模式（可选，方便排查）
-          debug: true
-          # 超时配置（避免同步超时）
-          timeout: "300s"
+      # 步骤4：同步到Gitee（核心：纯HTTPS命令，无SSH依赖）
+      - name: Sync to Gitee via HTTPS
+        run: |
+          # 添加Gitee为远程仓库（HTTPS地址+令牌认证）
+          git remote add gitee "https://${{ secrets.GITEE_TOKEN }}@gitee.com/bmg369/test.git"
+          # 拉取Gitee仓库最新内容（避免冲突，可选但建议加）
+          git fetch gitee
+          # 强制推送到Gitee（覆盖最新内容，确保同步成功）
+          git push -f gitee ${{ github.ref }}:refs/heads/main --no-verify
+          # 说明：若Gitee主分支是master，替换为 refs/heads/master
