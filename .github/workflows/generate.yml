@@ -3,7 +3,7 @@ name: Sync migu files to Gitee
 on:
   push:
     branches: [main, master]
-    paths:  # 核心：仅监听这两个文件的变更
+    paths:  # 仅监听这两个文件的变更
       - 'migu.m3u'
       - 'migu.txt'
   workflow_dispatch:  # 手动触发，方便测试
@@ -31,7 +31,7 @@ jobs:
           # 推回GitHub仓库（仅这两个文件的变更）
           git push "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/GSD-3726/tvtest.git" HEAD:${{ github.ref }}
 
-      # 步骤3：同步这两个文件的变更到Gitee
+      # 步骤3：同步这两个文件的变更到Gitee（修正无效参数，实现强制同步）
       - name: Sync migu files to Gitee (bmg369/test)
         uses: wearerequired/git-mirror-action@master
         env:
@@ -39,4 +39,5 @@ jobs:
         with:
           source-repo: "https://github.com/GSD-3726/tvtest.git"
           destination-repo: "https://${{ secrets.GITEE_TOKEN }}@gitee.com/bmg369/test.git"
-          force-push: true  # 确保Gitee获取最新的这两个文件
+          # 核心修改：用args传递强制推送参数，替代无效的force-push
+          args: "--force"  # 传递git push --force指令，实现强制同步
