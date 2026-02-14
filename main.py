@@ -244,7 +244,7 @@ def get_content(pid):
     }
     result = getSaltAndSign(pid)
     rateType = "2" if pid == "608831231" else "3"
-    URL = f"https://play.miguvideo.com/playurl/v1/play/playurl?sign={result['sign']}&rateType={rateType}&contId={pid}×tamp={result['timestamp']}&salt={result['salt']}"
+    URL = f"https://play.miguvideo.com/playurl/v1/play/playurl?sign={result['sign']}&rateType={rateType}&contId={pid}&timestamp={result['timestamp']}&salt={result['salt']}"
     params = URL.split("?")[1].split("&")
     body = {
         "option": {
